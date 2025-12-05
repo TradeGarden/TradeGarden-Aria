@@ -1,6 +1,6 @@
+import logging
 import os
 import time
-import logging
 from typing import Dict, Any
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 import requests
@@ -9,16 +9,19 @@ import uvicorn
 logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="Aria - TradeGarden Core")
 
+# Environment variables
 OPENAI_KEY = os.getenv("OPENAI_KEY")
-ALPACA_KEY = os.getenv("ALPACA_KEY")
-ALPACA_SECRET = os.getenv("ALPACA_SECRET")
+ALPACA_KEY = os.getenv("ALPACA_API_KEY")
+ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY")
+ALPACA_ENDPOINT = os.getenv("ALPACA_ENDPOINT", "https://paper-api.alpaca.markets")
 
 PHONE_TOKEN = os.getenv("PHONE_TOKEN", "phone-secret")
-MAX_RISK = float(os.getenv("MAX_RISK", "0.02"))   # 2% risk
-MAX_WIN_RATE = 0.10 # training threshold for learning log
 
-ALLOWED_SYMBOLS = os.getenv("ALLOWED_SYMBOLS", "AAPL,MSFT,SPY,QQQ,GOOG").split(",")
-PAPER_BASE = "https://paper-api.alpaca.markets"
+MAX_RISK = float(os.getenv("MAX_RISK", "0.02"))  # 2% risk
+
+ALLOWED_SYMBOLS = os.getenv(
+    "ALLOWED_SYMBOLS", "AAPL,MSFT,SPY,QQQ,GOOG"
+).split(",")
 
 state = {
     "daily_loss": 0.0,
@@ -27,34 +30,51 @@ state = {
 }
 
 
+@app.get("/")
+def home():
+    return {
+        "status": "Aria is online",
+        "message": "Welcome to TradeGarden AI Core"
+    }
+
+
 def reset_daily_if_needed():
     now = int(time.time())
-    if now - state["last_reset"] > 24*3600:
+    if now - state["last_reset"] > 24 * 3600:
         state["daily_loss"] = 0.0
         state["orders_today"] = 0
         state["last_reset"] = now
 
 
 def call_openai(prompt: str) -> Dict[str, Any]:
-    headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {OPENAI_KEY}",
+        "Content-Type": "application/json"
+    }
     payload = {
         "model": "gpt-4o-mini",
         "messages": [
-            {"role": "system", "content":
-                "You are Aria, a highly skilled trader."
-                "All outputs MUST be JSON only. No extra text."
-                "Risk must be 2% of capital."
-                "Always explain why you take a trade."
-                "If user wants analysis, return: "
-                '{"action":"analysis","text":"..."}'
-                "If trade, return:"
-                '{"action":"order","side":"buy|sell","symbol":"...","qty":number,"reason":"..."}'
+            {
+                "role": "system",
+                "content": (
+                    "You are Aria, a highly skilled trader. "
+                    "All outputs MUST be JSON only. No extra text. "
+                    "Risk must be 2% of capital. "
+                    "Always explain why you take a trade. "
+                    'If user wants analysis, return: {"action":"analysis","text":"..."} '
+                    'If trade, return: {"action":"order","side":"buy|sell","symbol":"...","qty":number,"reason":"..."}'
+                )
             },
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.0
     }
-    r = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+
+    r = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers=headers,
+        json=payload
+    )
     r.raise_for_status()
     return r.json()
 
@@ -68,7 +88,7 @@ def safe_parse_json(text: str):
 
 
 def place_order(order: Dict[str, Any]):
-    url = f"{PAPER_BASE}/v2/orders"
+    url = f"{ALPACA_ENDPOINT}/v2/orders"
     headers = {
         "APCA-API-KEY-ID": ALPACA_KEY,
         "APCA-API-SECRET-KEY": ALPACA_SECRET,
@@ -101,12 +121,12 @@ async def assistant(req: Request, background: BackgroundTasks):
         return parsed
 
     if parsed.get("action") == "order":
-        side = parsed["side"]
         symbol = parsed["symbol"]
-        qty = int(parsed["qty"])
-
         if symbol not in ALLOWED_SYMBOLS:
-            return {"action": "rejected", "reason": "symbol not allowed"}
+            return {"action": "rejected", "reason": "Symbol not allowed"}
+
+        qty = int(parsed["qty"])
+        side = parsed["side"]
 
         order_payload = {
             "symbol": symbol,
