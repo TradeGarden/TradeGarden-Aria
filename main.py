@@ -1,180 +1,143 @@
 import os
-import time
-import logging
+import json
 import requests
-from typing import Dict, Any
-from fastapi import FastAPI, HTTPException, Request
-import uvicorn
+from fastapi import FastAPI, Header, HTTPException
+from dotenv import load_dotenv
 
-# -------------------------------------------------
-# Basic setup
-# -------------------------------------------------
-logging.basicConfig(level=logging.INFO)
-app = FastAPI(title="Aria – TradeGarden Crypto Core")
+# Load environment variables (Render + local)
+load_dotenv()
 
-# -------------------------------------------------
-# Environment
-# -------------------------------------------------
-OPENAI_KEY = os.getenv("OPENAI_KEY")
-APCA_KEY = os.getenv("APCA_API_KEY_ID")
-APCA_SECRET = os.getenv("APCA_API_SECRET_KEY")
-APCA_BASE = os.getenv("APCA_API_BASE_URL")
+# =========================
+# ENVIRONMENT VARIABLES
+# =========================
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
+ALPACA_SECRET = os.getenv("ALPACA_SECRET")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-PHONE_TOKEN = os.getenv("PHONE_TOKEN", "")
-MAX_RISK = float(os.getenv("MAX_RISK", "0.02"))
-CRYPTO_SYMBOLS = os.getenv("CRYPTO_SYMBOLS", "BTC/USD").split(",")
+if not ALPACA_API_KEY or not ALPACA_SECRET or not OPENAI_API_KEY:
+    raise RuntimeError("Missing required environment variables")
 
-# -------------------------------------------------
-# In-memory state (safe on free tier)
-# -------------------------------------------------
-memory = {
-    "trades": [],
-    "last_action": None
-}
+# =========================
+# APP SETUP
+# =========================
+app = FastAPI()
 
-# -------------------------------------------------
-# Helpers
-# -------------------------------------------------
-def alpaca_headers():
-    return {
-        "APCA-API-KEY-ID": APCA_KEY,
-        "APCA-API-SECRET-KEY": APCA_SECRET,
+AUTH_TOKEN = "aria-phone-2025"
+
+# =========================
+# HEALTH CHECK
+# =========================
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+# =========================
+# HELPER FUNCTIONS
+# =========================
+def get_btc_price():
+    url = "https://data.alpaca.markets/v1beta3/crypto/us/latest/bars?symbols=BTC/USD"
+    headers = {
+        "APCA-API-KEY-ID": ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET
+    }
+    r = requests.get(url, headers=headers, timeout=10)
+    r.raise_for_status()
+    return r.json()["bars"]["BTC/USD"]["c"]
+
+def place_crypto_order(side: str, notional: float):
+    url = "https://paper-api.alpaca.markets/v2/orders"
+    headers = {
+        "APCA-API-KEY-ID": ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET,
         "Content-Type": "application/json"
     }
-
-
-def get_crypto_price(symbol: str) -> float:
-    url = f"{APCA_BASE}/v1beta3/crypto/us/latest/trades"
-    params = {"symbols": symbol}
-    r = requests.get(url, headers=alpaca_headers(), params=params)
-    r.raise_for_status()
-    return r.json()["trades"][symbol]["p"]
-
-
-def place_crypto_order(symbol: str, qty: float, side: str):
-    url = f"{APCA_BASE}/v2/orders"
     payload = {
-        "symbol": symbol,
-        "qty": qty,
+        "symbol": "BTC/USD",
+        "notional": notional,
         "side": side,
         "type": "market",
         "time_in_force": "gtc"
     }
-    r = requests.post(url, headers=alpaca_headers(), json=payload)
+    r = requests.post(url, headers=headers, json=payload, timeout=10)
     r.raise_for_status()
     return r.json()
 
-
-def verify_last_order():
-    url = f"{APCA_BASE}/v2/orders?limit=1"
-    r = requests.get(url, headers=alpaca_headers())
-    r.raise_for_status()
-    return r.json()[0]
-
-
-def call_openai(prompt: str) -> Dict[str, Any]:
+def call_openai(prompt: str, price: float):
+    url = "https://api.openai.com/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {OPENAI_KEY}",
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
 
     system_prompt = (
-        "You are Aria, a professional crypto trader for TradeGarden.\n"
-        "Rules:\n"
-        "- Crypto ONLY (BTC/USD, ETH/USD)\n"
-        "- Always respond in JSON ONLY\n"
-        "- Flow: analysis → decision → order → explanation\n"
-        "- Never hallucinate prices\n"
-        "- Risk is strictly 2%\n\n"
-        "Response format:\n"
+        "You are Aria, a crypto trading AI. "
+        "Respond ONLY with valid JSON. "
+        "Schema:\n"
         "{\n"
-        '  "analysis": "...",\n'
         '  "decision": "buy | sell | hold",\n'
-        '  "symbol": "BTC/USD",\n'
-        '  "qty": number,\n'
-        '  "explanation": "..."\n'
-        "}"
+        '  "notional": number,\n'
+        '  "explanation": string\n'
+        "}\n"
+        "Do NOT include markdown or text outside JSON."
     )
 
     payload = {
         "model": "gpt-4o-mini",
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": f"{prompt}\nBTC price: {price}"}
         ],
-        "temperature": 0
+        "temperature": 0.2
     }
 
-    r = requests.post("https://api.openai.com/v1/chat/completions",
-                      headers=headers, json=payload)
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
     r.raise_for_status()
-    return r.json()
+    return r.json()["choices"][0]["message"]["content"]
 
-
-# -------------------------------------------------
-# Routes
-# -------------------------------------------------
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "service": "aria-core",
-        "memory_trades": len(memory["trades"])
-    }
-
-
+# =========================
+# MAIN ASSISTANT ENDPOINT
+# =========================
 @app.post("/assistant")
-async def assistant(req: Request):
-    auth = req.headers.get("Authorization", "")
-    if PHONE_TOKEN not in auth:
+def assistant(
+    body: dict,
+    authorization: str = Header(None)
+):
+    # Auth check
+    if authorization != f"Bearer {AUTH_TOKEN}":
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    body = await req.json()
-    user_prompt = body.get("prompt", "")
+    prompt = body.get("prompt")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required")
 
-    ai = call_openai(user_prompt)
-    content = ai["choices"][0]["message"]["content"]
+    # Get BTC price
+    price = get_btc_price()
 
-    decision = eval(content)  # safe here because we force JSON only
+    # Ask AI
+    ai_raw = call_openai(prompt, price)
 
-    symbol = decision["symbol"]
-    if symbol not in CRYPTO_SYMBOLS:
-        return {"error": "Symbol not allowed"}
+    # SAFE JSON PARSE (NO eval)
+    try:
+        decision = json.loads(ai_raw)
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail=f"AI returned invalid JSON: {ai_raw}"
+        )
 
-    price = get_crypto_price(symbol)
+    action = decision.get("decision")
+    notional = float(decision.get("notional", 0))
+    explanation = decision.get("explanation", "")
 
-    result = {
-        "analysis": decision["analysis"],
-        "decision": decision["decision"],
+    response = {
         "price": price,
-        "explanation": decision["explanation"]
+        "decision": action,
+        "explanation": explanation
     }
 
-    if decision["decision"] in ["buy", "sell"]:
-        order = place_crypto_order(
-            symbol=symbol,
-            qty=decision["qty"],
-            side=decision["decision"]
-        )
-        verified = verify_last_order()
+    # Execute trade only if valid
+    if action in ["buy", "sell"] and notional > 0:
+        order = place_crypto_order(action, notional)
+        response["order"] = order
 
-        memory["trades"].append({
-            "symbol": symbol,
-            "side": decision["decision"],
-            "qty": decision["qty"],
-            "price": price,
-            "time": time.time()
-        })
-
-        result["order"] = order
-        result["verified"] = verified
-
-    memory["last_action"] = result
-    return result
-
-
-# -------------------------------------------------
-# Entry
-# -------------------------------------------------
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+    return response
