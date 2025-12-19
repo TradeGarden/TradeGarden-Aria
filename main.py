@@ -1,143 +1,144 @@
 import os
-import json
+import logging
 import requests
-from fastapi import FastAPI, Header, HTTPException
-from dotenv import load_dotenv
+from fastapi import FastAPI, Request, HTTPException
+import uvicorn
 
-# Load environment variables (Render + local)
-load_dotenv()
+# ================== SETUP ==================
+logging.basicConfig(level=logging.INFO)
+app = FastAPI(title="Aria – TradeGarden Crypto Core")
 
-# =========================
-# ENVIRONMENT VARIABLES
-# =========================
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
-ALPACA_SECRET = os.getenv("ALPACA_SECRET")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# ================== ENV ==================
+ALPACA_BASE_URL = os.getenv("APCA_API_BASE_URL")
+ALPACA_KEY = os.getenv("APCA_API_KEY_ID")
+ALPACA_SECRET = os.getenv("APCA_API_SECRET_KEY")
 
-if not ALPACA_API_KEY or not ALPACA_SECRET or not OPENAI_API_KEY:
+OPENAI_KEY = os.getenv("OPENAI_KEY")
+AUTH_TOKEN = os.getenv("PHONE_TOKEN")
+
+CRYPTO_SYMBOLS = os.getenv("CRYPTO_SYMBOLS", "BTC/USD").split(",")
+MAX_RISK = float(os.getenv("MAX_RISK", "0.02"))
+
+# ================== VALIDATION ==================
+if not all([ALPACA_BASE_URL, ALPACA_KEY, ALPACA_SECRET, OPENAI_KEY, AUTH_TOKEN]):
     raise RuntimeError("Missing required environment variables")
 
-# =========================
-# APP SETUP
-# =========================
-app = FastAPI()
-
-AUTH_TOKEN = "aria-phone-2025"
-
-# =========================
-# HEALTH CHECK
-# =========================
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-# =========================
-# HELPER FUNCTIONS
-# =========================
-def get_btc_price():
-    url = "https://data.alpaca.markets/v1beta3/crypto/us/latest/bars?symbols=BTC/USD"
-    headers = {
-        "APCA-API-KEY-ID": ALPACA_API_KEY,
-        "APCA-API-SECRET-KEY": ALPACA_SECRET
-    }
-    r = requests.get(url, headers=headers, timeout=10)
-    r.raise_for_status()
-    return r.json()["bars"]["BTC/USD"]["c"]
-
-def place_crypto_order(side: str, notional: float):
-    url = "https://paper-api.alpaca.markets/v2/orders"
-    headers = {
-        "APCA-API-KEY-ID": ALPACA_API_KEY,
+# ================== HELPERS ==================
+def alpaca_headers():
+    return {
+        "APCA-API-KEY-ID": ALPACA_KEY,
         "APCA-API-SECRET-KEY": ALPACA_SECRET,
         "Content-Type": "application/json"
     }
+
+# ================== ROUTES ==================
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "aria-crypto",
+        "symbols": CRYPTO_SYMBOLS,
+        "risk": MAX_RISK
+    }
+
+@app.post("/assistant")
+async def assistant(req: Request):
+    auth = req.headers.get("Authorization", "")
+    if auth != f"Bearer {AUTH_TOKEN}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    body = await req.json()
+    prompt = body.get("prompt", "")
+
+    # ---------- Ask OpenAI ----------
     payload = {
-        "symbol": "BTC/USD",
-        "notional": notional,
+        "model": "gpt-4o-mini",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are Aria, a professional crypto trader.\n"
+                    "You ONLY trade crypto symbols.\n"
+                    "You MUST return valid JSON ONLY.\n\n"
+                    "Step 1: analysis\n"
+                    "Step 2: decision\n"
+                    "Step 3: order OR no_trade\n"
+                    "Step 4: explanation\n\n"
+                    "If trading, return:\n"
+                    "{"
+                    "\"analysis\": \"...\","
+                    "\"decision\": \"buy or sell\","
+                    "\"symbol\": \"BTC/USD\","
+                    "\"qty\": 0.001,"
+                    "\"explanation\": \"...\""
+                    "}\n\n"
+                    "If no trade:\n"
+                    "{"
+                    "\"analysis\": \"...\","
+                    "\"decision\": \"no_trade\","
+                    "\"explanation\": \"...\""
+                    "}"
+                )
+            },
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.0
+    }
+
+    ai = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENAI_KEY}",
+            "Content-Type": "application/json"
+        },
+        json=payload,
+        timeout=30
+    )
+    ai.raise_for_status()
+
+    content = ai.json()["choices"][0]["message"]["content"]
+
+    # ---------- Parse JSON ----------
+    try:
+        data = eval(content)  # safe because model forced to JSON
+    except Exception:
+        return {"error": "Invalid AI response", "raw": content}
+
+    # ---------- No Trade ----------
+    if data.get("decision") == "no_trade":
+        return data
+
+    # ---------- Trade ----------
+    symbol = data.get("symbol")
+    qty = float(data.get("qty", 0))
+    side = data.get("decision")
+
+    if symbol not in CRYPTO_SYMBOLS:
+        return {"error": "Symbol not allowed", "symbol": symbol}
+
+    order = {
+        "symbol": symbol,
+        "qty": qty,
         "side": side,
         "type": "market",
         "time_in_force": "gtc"
     }
-    r = requests.post(url, headers=headers, json=payload, timeout=10)
-    r.raise_for_status()
-    return r.json()
 
-def call_openai(prompt: str, price: float):
-    url = "https://api.openai.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    system_prompt = (
-        "You are Aria, a crypto trading AI. "
-        "Respond ONLY with valid JSON. "
-        "Schema:\n"
-        "{\n"
-        '  "decision": "buy | sell | hold",\n'
-        '  "notional": number,\n'
-        '  "explanation": string\n'
-        "}\n"
-        "Do NOT include markdown or text outside JSON."
+    resp = requests.post(
+        f"{ALPACA_BASE_URL}/v2/orders",
+        headers=alpaca_headers(),
+        json=order,
+        timeout=30
     )
+    resp.raise_for_status()
 
-    payload = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{prompt}\nBTC price: {price}"}
-        ],
-        "temperature": 0.2
+    return {
+        "analysis": data.get("analysis"),
+        "decision": side,
+        "order": resp.json(),
+        "explanation": data.get("explanation")
     }
 
-    r = requests.post(url, headers=headers, json=payload, timeout=20)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
-
-# =========================
-# MAIN ASSISTANT ENDPOINT
-# =========================
-@app.post("/assistant")
-def assistant(
-    body: dict,
-    authorization: str = Header(None)
-):
-    # Auth check
-    if authorization != f"Bearer {AUTH_TOKEN}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    prompt = body.get("prompt")
-    if not prompt:
-        raise HTTPException(status_code=400, detail="Prompt is required")
-
-    # Get BTC price
-    price = get_btc_price()
-
-    # Ask AI
-    ai_raw = call_openai(prompt, price)
-
-    # SAFE JSON PARSE (NO eval)
-    try:
-        decision = json.loads(ai_raw)
-    except Exception:
-        raise HTTPException(
-            status_code=500,
-            detail=f"AI returned invalid JSON: {ai_raw}"
-        )
-
-    action = decision.get("decision")
-    notional = float(decision.get("notional", 0))
-    explanation = decision.get("explanation", "")
-
-    response = {
-        "price": price,
-        "decision": action,
-        "explanation": explanation
-    }
-
-    # Execute trade only if valid
-    if action in ["buy", "sell"] and notional > 0:
-        order = place_crypto_order(action, notional)
-        response["order"] = order
-
-    return response
+# ================== START ==================
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
