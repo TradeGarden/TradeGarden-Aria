@@ -1,173 +1,154 @@
 import os
 import time
+import logging
 import requests
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from typing import Dict, Any
 
-app = FastAPI(title="Aria Crypto Trader")
+logging.basicConfig(level=logging.INFO)
 
-# =========================
-# ENVIRONMENT
-# =========================
-ALPACA_BASE = os.getenv("APCA_API_BASE_URL")
-ALPACA_KEY = os.getenv("APCA_API_KEY_ID")
-ALPACA_SECRET = os.getenv("APCA_API_SECRET_KEY")
+app = FastAPI(title="Aria – TradeGarden Crypto Core")
+
+# ===== ENV =====
+APCA_API_BASE_URL = os.getenv("APCA_API_BASE_URL")
+APCA_API_KEY_ID = os.getenv("APCA_API_KEY_ID")
+APCA_API_SECRET_KEY = os.getenv("APCA_API_SECRET_KEY")
 OPENAI_KEY = os.getenv("OPENAI_KEY")
 PHONE_TOKEN = os.getenv("PHONE_TOKEN")
+MAX_RISK = float(os.getenv("MAX_RISK", "0.02"))
+CRYPTO_SYMBOLS = os.getenv("CRYPTO_SYMBOLS", "BTC/USD,ETH/USD").split(",")
 
-CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD"]
-MAX_RISK = 0.02  # 2%
+# Alpaca crypto data endpoint (correct)
+CRYPTO_DATA_URL = "https://data.alpaca.markets/v1beta3/crypto/us/latest/bars"
 
-# =========================
-# SIMPLE MEMORY (SAFE)
-# =========================
-memory = {
-    "last_analysis": None,
-    "last_decision": None,
-    "last_trade": None,
+HEADERS_ALPACA = {
+    "APCA-API-KEY-ID": APCA_API_KEY_ID,
+    "APCA-API-SECRET-KEY": APCA_API_SECRET_KEY
 }
 
-# =========================
-# HELPERS
-# =========================
-def alpaca_headers():
-    return {
-        "APCA-API-KEY-ID": ALPACA_KEY,
-        "APCA-API-SECRET-KEY": ALPACA_SECRET,
-    }
+# ===== MEMORY (IN-MEMORY FOR NOW) =====
+memory = {
+    "trades": []
+}
 
-def get_crypto_price(symbol: str):
-    url = f"{ALPACA_BASE}/v1beta3/crypto/us/latest/trades"
-    r = requests.get(url, headers=alpaca_headers(), params={"symbols": symbol})
-    r.raise_for_status()
-    return r.json()["trades"][symbol]["p"]
-
-def verify_order(order_id: str):
-    url = f"{ALPACA_BASE}/v2/orders/{order_id}"
-    r = requests.get(url, headers=alpaca_headers())
-    r.raise_for_status()
-    return r.json()
-
-def place_crypto_order(symbol: str, side: str, notional: float):
-    url = f"{ALPACA_BASE}/v2/orders"
-    payload = {
-        "symbol": symbol,
-        "side": side,
-        "type": "market",
-        "time_in_force": "gtc",
-        "notional": notional,
-    }
-    r = requests.post(url, headers=alpaca_headers(), json=payload)
-    r.raise_for_status()
-    return r.json()
-
-def ask_openai(prompt: str):
-    headers = {
-        "Authorization": f"Bearer {OPENAI_KEY}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are Aria, a professional crypto trader.\n"
-                    "Rules:\n"
-                    "- Crypto ONLY\n"
-                    "- BTC/USD or ETH/USD only\n"
-                    "- Always return JSON\n"
-                    "- Follow stages: analysis → decision → explanation\n"
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,
-    }
-    r = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=body)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
-
-# =========================
-# ROUTES
-# =========================
+# ===== HEALTH =====
 @app.get("/health")
 def health():
     return {
         "status": "ok",
         "service": "aria-crypto",
         "symbols": CRYPTO_SYMBOLS,
-        "risk": MAX_RISK,
+        "risk": MAX_RISK
     }
 
+# ===== PRICE FETCH =====
+def get_crypto_price(symbol: str) -> float:
+    r = requests.get(
+        CRYPTO_DATA_URL,
+        headers=HEADERS_ALPACA,
+        params={"symbols": symbol},
+        timeout=10
+    )
+    r.raise_for_status()
+    data = r.json()
+    return data["bars"][symbol]["c"]
+
+# ===== AI =====
+def call_openai(prompt: str) -> Dict[str, Any]:
+    headers = {
+        "Authorization": f"Bearer {OPENAI_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are Aria, a professional crypto trader.\n"
+                    "Crypto ONLY (BTC/USD, ETH/USD).\n"
+                    "You must ALWAYS return JSON.\n"
+                    "Flow: analysis -> decision -> explanation.\n"
+                    "If no trade, return action=analysis.\n"
+                    "If trade, return action=order with symbol, side, qty, explanation."
+                )
+            },
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0
+    }
+
+    r = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=20
+    )
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
+
+# ===== ORDER =====
+def place_crypto_order(symbol: str, side: str, qty: float):
+    url = f"{APCA_API_BASE_URL}/v2/orders"
+    payload = {
+        "symbol": symbol,
+        "side": side,
+        "type": "market",
+        "qty": qty,
+        "time_in_force": "gtc"
+    }
+
+    r = requests.post(url, headers=HEADERS_ALPACA, json=payload, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+# ===== ASSISTANT =====
 @app.post("/assistant")
 async def assistant(req: Request):
-    auth = req.headers.get("Authorization")
-    if auth != f"Bearer {PHONE_TOKEN}":
+    if req.headers.get("Authorization") != f"Bearer {PHONE_TOKEN}":
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     body = await req.json()
     prompt = body.get("prompt", "")
 
-    # HARD BLOCK STOCKS
-    banned = ["aapl", "tsla", "stock", "share", "equity"]
-    if any(b in prompt.lower() for b in banned):
-        return {"error": "Stocks are disabled. Crypto only."}
+    ai_raw = call_openai(prompt)
 
-    # =========================
-    # ANALYSIS
-    # =========================
-    symbol = "BTC/USD"
-    price = get_crypto_price(symbol)
+    try:
+        import json
+        ai = json.loads(ai_raw)
+    except Exception:
+        raise HTTPException(status_code=500, detail="AI returned invalid JSON")
 
-    analysis_prompt = (
-        f"BTC current price is ${price}. "
-        f"Analyze market conditions and decide whether to BUY, SELL, or HOLD."
-    )
+    if ai["action"] == "analysis":
+        return ai
 
-    ai_response = ask_openai(analysis_prompt)
+    if ai["action"] == "order":
+        symbol = ai["symbol"]
+        side = ai["side"]
+        qty = float(ai["qty"])
 
-    memory["last_analysis"] = {
-        "symbol": symbol,
-        "price": price,
-        "ai": ai_response,
-        "time": time.time(),
-    }
+        if symbol not in CRYPTO_SYMBOLS:
+            raise HTTPException(status_code=400, detail="Symbol not allowed")
 
-    # =========================
-    # DECISION LOGIC (SAFE)
-    # =========================
-    decision = "hold"
-    if "buy" in ai_response.lower():
-        decision = "buy"
-    elif "sell" in ai_response.lower():
-        decision = "sell"
+        price = get_crypto_price(symbol)
+        order = place_crypto_order(symbol, side, qty)
 
-    memory["last_decision"] = decision
+        memory["trades"].append({
+            "time": time.time(),
+            "symbol": symbol,
+            "side": side,
+            "qty": qty,
+            "price": price,
+            "reason": ai.get("explanation", "")
+        })
 
-    # =========================
-    # ORDER (ONLY IF BUY/SELL)
-    # =========================
-    trade_result = None
-
-    if decision in ["buy", "sell"]:
-        notional = 50  # paper trade amount
-        order = place_crypto_order(symbol, decision, notional)
-        verified = verify_order(order["id"])
-
-        trade_result = {
+        return {
+            "action": "placed",
+            "symbol": symbol,
+            "price": price,
             "order": order,
-            "verified": verified,
+            "explanation": ai.get("explanation")
         }
 
-        memory["last_trade"] = trade_result
-
-    # =========================
-    # RESPONSE
-    # =========================
-    return {
-        "stage": "complete",
-        "analysis": memory["last_analysis"],
-        "decision": decision,
-        "trade": trade_result,
-        "explanation": "Trade only executed after Alpaca verification.",
-    }
+    return ai
