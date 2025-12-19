@@ -1,43 +1,24 @@
 import os
-import json
-import logging
 import requests
 from fastapi import FastAPI, Request, HTTPException
-import uvicorn
-import re
 
-logging.basicConfig(level=logging.INFO)
-app = FastAPI(title="Aria – TradeGarden Crypto Core")
+app = FastAPI()
 
-# ========= ENV =========
+# ========================
+# ENV VARIABLES
+# ========================
 ALPACA_BASE_URL = os.getenv("APCA_API_BASE_URL")
 ALPACA_KEY = os.getenv("APCA_API_KEY_ID")
 ALPACA_SECRET = os.getenv("APCA_API_SECRET_KEY")
 OPENAI_KEY = os.getenv("OPENAI_KEY")
 AUTH_TOKEN = os.getenv("PHONE_TOKEN")
 
-CRYPTO_SYMBOLS = os.getenv("CRYPTO_SYMBOLS", "BTC/USD").split(",")
+CRYPTO_SYMBOLS = os.getenv("CRYPTO_SYMBOLS", "BTC/USD,ETH/USD").split(",")
 MAX_RISK = float(os.getenv("MAX_RISK", "0.02"))
 
-# ========= VALIDATION =========
-if not all([ALPACA_BASE_URL, ALPACA_KEY, ALPACA_SECRET, OPENAI_KEY, AUTH_TOKEN]):
-    raise RuntimeError("Missing required environment variables")
-
-# ========= HELPERS =========
-def alpaca_headers():
-    return {
-        "APCA-API-KEY-ID": ALPACA_KEY,
-        "APCA-API-SECRET-KEY": ALPACA_SECRET,
-        "Content-Type": "application/json"
-    }
-
-def extract_json(text: str):
-    match = re.search(r"\{.*\}", text, re.S)
-    if not match:
-        raise ValueError("No JSON found in AI response")
-    return json.loads(match.group())
-
-# ========= ROUTES =========
+# ========================
+# HEALTH CHECK
+# ========================
 @app.get("/health")
 def health():
     return {
@@ -47,78 +28,31 @@ def health():
         "risk": MAX_RISK
     }
 
-@app.post("/assistant")
-async def assistant(req: Request):
-    auth = req.headers.get("Authorization", "")
-    if auth != f"Bearer {AUTH_TOKEN}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    body = await req.json()
-    prompt = body.get("prompt", "")
-
-    # ===== OpenAI Request =====
-    payload = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are Aria, a professional crypto trader.\n"
-                    "You ONLY trade crypto.\n"
-                    "Return JSON ONLY.\n\n"
-                    "If trading:\n"
-                    "{"
-                    "\"analysis\": \"...\","
-                    "\"decision\": \"buy or sell\","
-                    "\"symbol\": \"BTC/USD\","
-                    "\"qty\": 0.001,"
-                    "\"explanation\": \"...\""
-                    "}\n\n"
-                    "If no trade:\n"
-                    "{"
-                    "\"analysis\": \"...\","
-                    "\"decision\": \"no_trade\","
-                    "\"explanation\": \"...\""
-                    "}"
-                )
-            },
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0
-    }
-
-    ai = requests.post(
-        "https://api.openai.com/v1/chat/completions",
+# ========================
+# HELPER: GET CRYPTO PRICE
+# ========================
+def get_crypto_price(symbol: str):
+    url = f"{ALPACA_BASE_URL}/v2/crypto/latest/trades"
+    r = requests.get(
+        url,
         headers={
-            "Authorization": f"Bearer {OPENAI_KEY}",
-            "Content-Type": "application/json"
+            "APCA-API-KEY-ID": ALPACA_KEY,
+            "APCA-API-SECRET-KEY": ALPACA_SECRET
         },
-        json=payload,
-        timeout=30
+        params={"symbols": symbol},
+        timeout=10
     )
-    ai.raise_for_status()
 
-    raw = ai.json()["choices"][0]["message"]["content"]
+    data = r.json()
+    return data["trades"][symbol]["p"]
 
-    try:
-        data = extract_json(raw)
-    except Exception as e:
-        logging.error(raw)
-        return {"error": "AI response parse failed", "raw": raw}
+# ========================
+# HELPER: PLACE ORDER
+# ========================
+def place_crypto_order(symbol, qty, side):
+    url = f"{ALPACA_BASE_URL}/v2/orders"
 
-    # ===== No Trade =====
-    if data.get("decision") == "no_trade":
-        return data
-
-    # ===== Trade =====
-    symbol = data.get("symbol")
-    qty = float(data.get("qty", 0))
-    side = data.get("decision")
-
-    if symbol not in CRYPTO_SYMBOLS:
-        return {"error": "Symbol not allowed", "symbol": symbol}
-
-    order = {
+    payload = {
         "symbol": symbol,
         "qty": qty,
         "side": side,
@@ -126,21 +60,84 @@ async def assistant(req: Request):
         "time_in_force": "gtc"
     }
 
-    resp = requests.post(
-        f"{ALPACA_BASE_URL}/v2/orders",
-        headers=alpaca_headers(),
-        json=order,
-        timeout=30
+    r = requests.post(
+        url,
+        json=payload,
+        headers={
+            "APCA-API-KEY-ID": ALPACA_KEY,
+            "APCA-API-SECRET-KEY": ALPACA_SECRET
+        },
+        timeout=10
     )
-    resp.raise_for_status()
 
-    return {
-        "analysis": data["analysis"],
-        "decision": side,
-        "order": resp.json(),
-        "explanation": data["explanation"]
-    }
+    return r.json()
 
-# ========= START =========
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+# ========================
+# ASSISTANT ENDPOINT
+# ========================
+@app.post("/assistant")
+async def assistant(req: Request):
+    try:
+        # ---- AUTH ----
+        auth = req.headers.get("Authorization", "")
+        if auth != f"Bearer {AUTH_TOKEN}":
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        body = await req.json()
+        prompt = body.get("prompt", "").strip()
+
+        if not prompt:
+            raise HTTPException(status_code=400, detail="Empty prompt")
+
+        # ---- GET BTC PRICE ----
+        price = get_crypto_price("BTC/USD")
+
+        # ---- AI ANALYSIS ----
+        ai_payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Aria, a crypto-only trading assistant. "
+                        "You must respond in this order:\n"
+                        "1. Market analysis\n"
+                        "2. Trade decision (buy/sell/hold)\n"
+                        "3. Risk explanation\n"
+                        "DO NOT claim a trade is placed unless instructed."
+                    )
+                },
+                {"role": "user", "content": f"{prompt}\nBTC price: {price}"}
+            ]
+        }
+
+        ai = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_KEY}",
+                "Content-Type": "application/json"
+            },
+            json=ai_payload,
+            timeout=30
+        )
+
+        ai_json = ai.json()
+        response_text = ai_json["choices"][0]["message"]["content"]
+
+        # ---- OPTIONAL TRADE ----
+        trade_result = None
+        if "buy" in prompt.lower():
+            trade_result = place_crypto_order("BTC/USD", 0.001, "buy")
+
+        return {
+            "price": price,
+            "analysis": response_text,
+            "trade": trade_result
+        }
+
+    except Exception as e:
+        return {
+            "error": str(e),
+            "type": str(type(e))
+        }
+        
