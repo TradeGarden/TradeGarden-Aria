@@ -2,56 +2,57 @@ import os
 import requests
 from fastapi import FastAPI, Request, HTTPException
 
-app = FastAPI()
-
-# ========================
+# =========================
 # ENV VARIABLES
-# ========================
+# =========================
 ALPACA_BASE_URL = os.getenv("APCA_API_BASE_URL")
 ALPACA_KEY = os.getenv("APCA_API_KEY_ID")
 ALPACA_SECRET = os.getenv("APCA_API_SECRET_KEY")
+
 OPENAI_KEY = os.getenv("OPENAI_KEY")
 AUTH_TOKEN = os.getenv("PHONE_TOKEN")
 
-CRYPTO_SYMBOLS = os.getenv("CRYPTO_SYMBOLS", "BTC/USD,ETH/USD").split(",")
-MAX_RISK = float(os.getenv("MAX_RISK", "0.02"))
+if not all([ALPACA_BASE_URL, ALPACA_KEY, ALPACA_SECRET, OPENAI_KEY, AUTH_TOKEN]):
+    raise RuntimeError("Missing environment variables")
 
-# ========================
+# =========================
+# APP INIT
+# =========================
+app = FastAPI(title="Aria Crypto Trader")
+
+CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD"]
+RISK = 0.02
+
+# =========================
 # HEALTH CHECK
-# ========================
+# =========================
 @app.get("/health")
 def health():
     return {
         "status": "ok",
         "service": "aria-crypto",
         "symbols": CRYPTO_SYMBOLS,
-        "risk": MAX_RISK
+        "risk": RISK
     }
 
-# ========================
-# HELPER: GET CRYPTO PRICE
-# ========================
+# =========================
+# ALPACA HELPERS
+# =========================
+def alpaca_headers():
+    return {
+        "APCA-API-KEY-ID": ALPACA_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET,
+        "Content-Type": "application/json"
+    }
+
 def get_crypto_price(symbol: str):
-    url = f"{ALPACA_BASE_URL}/v2/crypto/latest/trades"
-    r = requests.get(
-        url,
-        headers={
-            "APCA-API-KEY-ID": ALPACA_KEY,
-            "APCA-API-SECRET-KEY": ALPACA_SECRET
-        },
-        params={"symbols": symbol},
-        timeout=10
-    )
+    url = f"{ALPACA_BASE_URL}/v1beta3/crypto/us/latest/trades"
+    r = requests.get(url, headers=alpaca_headers(), params={"symbols": symbol}, timeout=15)
+    r.raise_for_status()
+    return r.json()["trades"][symbol]["p"]
 
-    data = r.json()
-    return data["trades"][symbol]["p"]
-
-# ========================
-# HELPER: PLACE ORDER
-# ========================
-def place_crypto_order(symbol, qty, side):
+def place_crypto_order(symbol: str, qty: float, side: str):
     url = f"{ALPACA_BASE_URL}/v2/orders"
-
     payload = {
         "symbol": symbol,
         "qty": qty,
@@ -59,22 +60,13 @@ def place_crypto_order(symbol, qty, side):
         "type": "market",
         "time_in_force": "gtc"
     }
-
-    r = requests.post(
-        url,
-        json=payload,
-        headers={
-            "APCA-API-KEY-ID": ALPACA_KEY,
-            "APCA-API-SECRET-KEY": ALPACA_SECRET
-        },
-        timeout=10
-    )
-
+    r = requests.post(url, headers=alpaca_headers(), json=payload, timeout=15)
+    r.raise_for_status()
     return r.json()
 
-# ========================
-# ASSISTANT ENDPOINT
-# ========================
+# =========================
+# ASSISTANT (DEBUG SAFE)
+# =========================
 @app.post("/assistant")
 async def assistant(req: Request):
     try:
@@ -84,55 +76,31 @@ async def assistant(req: Request):
             raise HTTPException(status_code=401, detail="Unauthorized")
 
         body = await req.json()
-        prompt = body.get("prompt", "").strip()
+        prompt = body.get("prompt", "").lower()
 
-        if not prompt:
-            raise HTTPException(status_code=400, detail="Empty prompt")
+        # ---- FORCE CRYPTO ONLY ----
+        symbol = "BTC/USD" if "btc" in prompt else "ETH/USD"
 
-        # ---- GET BTC PRICE ----
-        price = get_crypto_price("BTC/USD")
+        price = get_crypto_price(symbol)
 
-        # ---- AI ANALYSIS ----
-        ai_payload = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are Aria, a crypto-only trading assistant. "
-                        "You must respond in this order:\n"
-                        "1. Market analysis\n"
-                        "2. Trade decision (buy/sell/hold)\n"
-                        "3. Risk explanation\n"
-                        "DO NOT claim a trade is placed unless instructed."
-                    )
-                },
-                {"role": "user", "content": f"{prompt}\nBTC price: {price}"}
-            ]
-        }
+        analysis = f"{symbol} live price is ${price:.2f}. Market is volatile."
 
-        ai = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENAI_KEY}",
-                "Content-Type": "application/json"
-            },
-            json=ai_payload,
-            timeout=30
-        )
+        decision = "hold"
+        if "buy" in prompt:
+            decision = "buy"
+        elif "sell" in prompt:
+            decision = "sell"
 
-        ai_json = ai.json()
-        response_text = ai_json["choices"][0]["message"]["content"]
-
-        # ---- OPTIONAL TRADE ----
-        trade_result = None
-        if "buy" in prompt.lower():
-            trade_result = place_crypto_order("BTC/USD", 0.001, "buy")
+        order_result = None
+        if decision in ["buy", "sell"]:
+            qty = round((100 * RISK) / price, 6)
+            order_result = place_crypto_order(symbol, qty, decision)
 
         return {
-            "price": price,
-            "analysis": response_text,
-            "trade": trade_result
+            "analysis": analysis,
+            "decision": decision,
+            "order": order_result,
+            "explanation": "Crypto-only execution with live Alpaca verification."
         }
 
     except Exception as e:
@@ -140,4 +108,3 @@ async def assistant(req: Request):
             "error": str(e),
             "type": str(type(e))
         }
-        
