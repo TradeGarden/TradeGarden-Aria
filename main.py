@@ -1,86 +1,58 @@
 import os
-import time
 import logging
-from typing import Dict, Any
 from fastapi import FastAPI, Request, HTTPException
 import requests
 
 # --------------------------------------------------
-# App setup
+# Setup
 # --------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="Aria – TradeGarden Crypto Core")
 
 # --------------------------------------------------
-# Environment variables (DO NOT hardcode secrets)
+# ENV VARS
 # --------------------------------------------------
 OPENAI_KEY = os.getenv("OPENAI_KEY")
 PHONE_TOKEN = os.getenv("PHONE_TOKEN", "aria-phone-2026")
 
-APCA_API_BASE_URL = os.getenv(
-    "APCA_API_BASE_URL",
-    "https://paper-api.alpaca.markets"
-)
-
-APCA_API_KEY_ID = os.getenv("APCA_API_KEY_ID")
-APCA_API_SECRET_KEY = os.getenv("APCA_API_SECRET_KEY")
-
+CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD"]
 MAX_RISK = float(os.getenv("MAX_RISK", "0.02"))
 
-# Crypto-only symbols (LOCKED)
-CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD"]
-
 # --------------------------------------------------
-# Simple in-memory memory (Layer 2)
+# OpenAI
 # --------------------------------------------------
-memory = {
-    "conversations": [],
-    "decisions": [],
-    "started_at": int(time.time())
-}
-
-# --------------------------------------------------
-# OpenAI call (analysis only, no fake prices)
-# --------------------------------------------------
-def call_openai(prompt: str) -> Dict[str, Any]:
+def call_openai(prompt: str):
     headers = {
         "Authorization": f"Bearer {OPENAI_KEY}",
         "Content-Type": "application/json",
     }
 
-    system_prompt = (
-        "You are Aria, a professional crypto trader.\n"
-        "You ONLY trade crypto.\n"
-        "Allowed symbols: BTC/USD, ETH/USD.\n"
-        "You NEVER invent prices.\n"
-        "You ALWAYS return JSON only.\n\n"
-        "You must respond in this format:\n"
-        "{\n"
-        '  "symbol": "BTC/USD",\n'
-        '  "analysis": "...",\n'
-        '  "decision": "buy | sell | hold",\n'
-        '  "risk": "2%",\n'
-        '  "reason": "..."\n'
-        "}\n"
-    )
-
     payload = {
         "model": "gpt-4o-mini",
         "messages": [
-            {"role": "system", "content": system_prompt},
+            {
+                "role": "system",
+                "content": (
+                    "You are Aria, a professional crypto trader.\n"
+                    "Only BTC/USD or ETH/USD.\n"
+                    "No fake prices.\n"
+                    "Return JSON ONLY:\n"
+                    "{symbol, analysis, decision, risk, reason}"
+                ),
+            },
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.0,
     }
 
-    response = requests.post(
+    r = requests.post(
         "https://api.openai.com/v1/chat/completions",
         headers=headers,
         json=payload,
         timeout=30,
     )
-    response.raise_for_status()
-    return response.json()
+    r.raise_for_status()
+    return r.json()
 
 # --------------------------------------------------
 # Routes
@@ -100,7 +72,6 @@ def health():
 
 @app.post("/assistant")
 async def assistant(req: Request):
-    # Auth check
     auth = req.headers.get("Authorization", "")
     if auth != f"Bearer {PHONE_TOKEN}":
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -109,23 +80,9 @@ async def assistant(req: Request):
     prompt = body.get("prompt")
 
     if not prompt:
-        raise HTTPException(status_code=400, detail="Missing prompt")
+        raise HTTPException(status_code=400, detail="Prompt required")
 
-    # Store conversation
-    memory["conversations"].append(
-        {"time": int(time.time()), "prompt": prompt}
-    )
+    ai = call_openai(prompt)
+    content = ai["choices"][0]["message"]["content"]
 
-    ai_response = call_openai(prompt)
-    content = ai_response["choices"][0]["message"]["content"]
-
-    # Save decision
-    memory["decisions"].append(
-        {"time": int(time.time()), "response": content}
-    )
-
-    return {
-        "action": "analysis",
-        "response": content,
-        "memory_size": len(memory["decisions"]),
-    }
+    return {"action": "analysis", "response": content}
