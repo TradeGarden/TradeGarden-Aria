@@ -1,65 +1,28 @@
+from fastapi import FastAPI, Request, Header, HTTPException
 import os
-import logging
-from fastapi import FastAPI, Request, HTTPException
 import requests
+from dotenv import load_dotenv
 
-# --------------------------------------------------
-# Setup
-# --------------------------------------------------
-logging.basicConfig(level=logging.INFO)
-app = FastAPI(title="Aria – TradeGarden Crypto Core")
+load_dotenv()
 
-# --------------------------------------------------
-# ENV VARS
-# --------------------------------------------------
-OPENAI_KEY = os.getenv("OPENAI_KEY")
-PHONE_TOKEN = os.getenv("PHONE_TOKEN", "aria-phone-2026")
+app = FastAPI()
 
-CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD"]
-MAX_RISK = float(os.getenv("MAX_RISK", "0.02"))
+# ENV
+ALPACA_KEY = os.getenv("APCA_API_KEY_ID")
+ALPACA_SECRET = os.getenv("APCA_API_SECRET_KEY")
+ALPACA_BASE = os.getenv("APCA_API_BASE_URL")
 
-# --------------------------------------------------
-# OpenAI
-# --------------------------------------------------
-def call_openai(prompt: str):
-    headers = {
-        "Authorization": f"Bearer {OPENAI_KEY}",
-        "Content-Type": "application/json",
-    }
+PHONE_TOKEN = os.getenv("PHONE_TOKEN")
 
-    payload = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are Aria, a professional crypto trader.\n"
-                    "Only BTC/USD or ETH/USD.\n"
-                    "No fake prices.\n"
-                    "Return JSON ONLY:\n"
-                    "{symbol, analysis, decision, risk, reason}"
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.0,
-    }
+HEADERS = {
+    "APCA-API-KEY-ID": ALPACA_KEY,
+    "APCA-API-SECRET-KEY": ALPACA_SECRET,
+    "Content-Type": "application/json"
+}
 
-    r = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=30,
-    )
-    r.raise_for_status()
-    return r.json()
+CRYPTO_SYMBOLS = ["BTCUSD", "ETHUSD"]
+MAX_RISK = 0.02
 
-# --------------------------------------------------
-# Routes
-# --------------------------------------------------
-@app.get("/")
-def root():
-    return {"message": "Aria is alive"}
 
 @app.get("/health")
 def health():
@@ -67,22 +30,53 @@ def health():
         "status": "ok",
         "service": "aria-crypto",
         "symbols": CRYPTO_SYMBOLS,
-        "risk": MAX_RISK,
+        "risk": MAX_RISK
     }
 
-@app.post("/assistant")
-async def assistant(req: Request):
-    auth = req.headers.get("Authorization", "")
-    if auth != f"Bearer {PHONE_TOKEN}":
+
+@app.post("/trade")
+async def trade(request: Request, authorization: str = Header(None)):
+    if authorization != f"Bearer {PHONE_TOKEN}":
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    body = await req.json()
-    prompt = body.get("prompt")
+    body = await request.json()
+    symbol = body.get("symbol", "BTCUSD")
+    side = body.get("side", "buy")
+    notional = body.get("notional", 10)
 
-    if not prompt:
-        raise HTTPException(status_code=400, detail="Prompt required")
+    if symbol not in CRYPTO_SYMBOLS:
+        raise HTTPException(status_code=400, detail="Invalid crypto symbol")
 
-    ai = call_openai(prompt)
-    content = ai["choices"][0]["message"]["content"]
+    order_payload = {
+        "symbol": symbol,
+        "side": side,
+        "type": "market",
+        "notional": notional,
+        "time_in_force": "gtc"
+    }
 
-    return {"action": "analysis", "response": content}
+    try:
+        response = requests.post(
+            f"{ALPACA_BASE}/v2/orders",
+            json=order_payload,
+            headers=HEADERS,
+            timeout=10
+        )
+
+        if response.status_code >= 400:
+            return {
+                "error": "Alpaca rejected order",
+                "alpaca_status": response.status_code,
+                "alpaca_response": response.text
+            }
+
+        return {
+            "status": "order_submitted",
+            "order": response.json()
+        }
+
+    except Exception as e:
+        return {
+            "error": "Internal exception",
+            "detail": str(e)
+        }
