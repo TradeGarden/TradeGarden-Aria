@@ -1,55 +1,76 @@
-import os
-from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+import requests
+from datetime import datetime
 
-# --------------------
-# App Init
-# --------------------
-app = FastAPI()
+app = FastAPI(title="Aria Crypto Engine", version="1.0")
 
-# --------------------
-# Environment Variables
-# --------------------
-PHONE_TOKEN = os.getenv("PHONE_TOKEN")
-
-# --------------------
-# Models
-# --------------------
-class AssistRequest(BaseModel):
-    prompt: str
-
-# --------------------
-# Health Check
-# --------------------
+# ======================
+# HEALTH CHECK
+# ======================
 @app.get("/health")
 def health():
     return {
         "status": "ok",
-        "service": "aria"
+        "service": "aria-phase-1",
+        "time": datetime.utcnow().isoformat()
     }
 
-# --------------------
-# Root
-# --------------------
-@app.get("/")
-def root():
-    return {"message": "Aria is alive"}
+# ======================
+# CRYPTO ANALYSIS
+# ======================
+@app.post("/analyze")
+def analyze_crypto(payload: dict):
+    symbol = payload.get("symbol", "").upper()
 
-# --------------------
-# ASSIST ENDPOINT (THIS IS THE ONE YOU USE)
-# --------------------
-@app.post("/assist")
-def assist(
-    data: AssistRequest,
-    authorization: str = Header(None)
-):
-    # Optional simple auth check
-    if PHONE_TOKEN:
-        if not authorization or authorization != f"Bearer {PHONE_TOKEN}":
-            raise HTTPException(status_code=401, detail="Unauthorized")
+    symbol_map = {
+        "BTCUSD": "bitcoin",
+        "ETHUSD": "ethereum"
+    }
 
-    # Simple response (no OpenAI, no Alpaca yet)
+    if symbol not in symbol_map:
+        raise HTTPException(
+            status_code=400,
+            detail="Supported symbols: BTCUSD, ETHUSD"
+        )
+
+    coin_id = symbol_map[symbol]
+
+    try:
+        url = (
+            "https://api.coingecko.com/api/v3/simple/price"
+            f"?ids={coin_id}&vs_currencies=usd"
+            "&include_24hr_change=true"
+        )
+        response = requests.get(url, timeout=10)
+        data = response.json()
+
+        price = data[coin_id]["usd"]
+        change_24h = data[coin_id]["usd_24h_change"]
+
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to fetch market data"
+        )
+
+    # ======================
+    # SIMPLE LOGIC
+    # ======================
+    if change_24h > 1:
+        bias = "bullish"
+        action = "look for long entries"
+    elif change_24h < -1:
+        bias = "bearish"
+        action = "look for short or wait"
+    else:
+        bias = "neutral"
+        action = "no trade zone"
+
     return {
-        "action": "analysis",
-        "text": f"Aria received your message: {data.prompt}"
+        "symbol": symbol,
+        "price_usd": round(price, 2),
+        "change_24h_percent": round(change_24h, 2),
+        "bias": bias,
+        "suggested_action": action,
+        "analysis_time_utc": datetime.utcnow().isoformat()
     }
