@@ -1,82 +1,55 @@
-from fastapi import FastAPI, Request, Header, HTTPException
 import os
-import requests
-from dotenv import load_dotenv
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel
 
-load_dotenv()
-
+# --------------------
+# App Init
+# --------------------
 app = FastAPI()
 
-# ENV
-ALPACA_KEY = os.getenv("APCA_API_KEY_ID")
-ALPACA_SECRET = os.getenv("APCA_API_SECRET_KEY")
-ALPACA_BASE = os.getenv("APCA_API_BASE_URL")
-
+# --------------------
+# Environment Variables
+# --------------------
 PHONE_TOKEN = os.getenv("PHONE_TOKEN")
 
-HEADERS = {
-    "APCA-API-KEY-ID": ALPACA_KEY,
-    "APCA-API-SECRET-KEY": ALPACA_SECRET,
-    "Content-Type": "application/json"
-}
+# --------------------
+# Models
+# --------------------
+class AssistRequest(BaseModel):
+    prompt: str
 
-CRYPTO_SYMBOLS = ["BTCUSD", "ETHUSD"]
-MAX_RISK = 0.02
-
-
+# --------------------
+# Health Check
+# --------------------
 @app.get("/health")
 def health():
     return {
         "status": "ok",
-        "service": "aria-crypto",
-        "symbols": CRYPTO_SYMBOLS,
-        "risk": MAX_RISK
+        "service": "aria"
     }
 
+# --------------------
+# Root
+# --------------------
+@app.get("/")
+def root():
+    return {"message": "Aria is alive"}
 
-@app.post("/trade")
-async def trade(request: Request, authorization: str = Header(None)):
-    if authorization != f"Bearer {PHONE_TOKEN}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+# --------------------
+# ASSIST ENDPOINT (THIS IS THE ONE YOU USE)
+# --------------------
+@app.post("/assist")
+def assist(
+    data: AssistRequest,
+    authorization: str = Header(None)
+):
+    # Optional simple auth check
+    if PHONE_TOKEN:
+        if not authorization or authorization != f"Bearer {PHONE_TOKEN}":
+            raise HTTPException(status_code=401, detail="Unauthorized")
 
-    body = await request.json()
-    symbol = body.get("symbol", "BTCUSD")
-    side = body.get("side", "buy")
-    notional = body.get("notional", 10)
-
-    if symbol not in CRYPTO_SYMBOLS:
-        raise HTTPException(status_code=400, detail="Invalid crypto symbol")
-
-    order_payload = {
-        "symbol": symbol,
-        "side": side,
-        "type": "market",
-        "notional": notional,
-        "time_in_force": "gtc"
+    # Simple response (no OpenAI, no Alpaca yet)
+    return {
+        "action": "analysis",
+        "text": f"Aria received your message: {data.prompt}"
     }
-
-    try:
-        response = requests.post(
-            f"{ALPACA_BASE}/v2/orders",
-            json=order_payload,
-            headers=HEADERS,
-            timeout=10
-        )
-
-        if response.status_code >= 400:
-            return {
-                "error": "Alpaca rejected order",
-                "alpaca_status": response.status_code,
-                "alpaca_response": response.text
-            }
-
-        return {
-            "status": "order_submitted",
-            "order": response.json()
-        }
-
-    except Exception as e:
-        return {
-            "error": "Internal exception",
-            "detail": str(e)
-        }
