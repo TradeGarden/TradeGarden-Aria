@@ -1,6 +1,7 @@
 import requests
 from fastapi import FastAPI, HTTPException, Query
 from datetime import datetime
+import os
 
 app = FastAPI(title="Aria Crypto – Layer 2A")
 
@@ -17,9 +18,11 @@ EMA_FAST = 20
 EMA_SLOW = 50
 RSI_PERIOD = 14
 
+# AI API Key (add this in Render Dashboard → Environment Variables)
+AI_API_KEY = os.getenv("AI_API_KEY")  # e.g. Grok, OpenAI, etc.
 
 # =====================
-# HELPERS
+# HELPERS (unchanged)
 # =====================
 def ema(prices, period):
     k = 2 / (period + 1)
@@ -27,7 +30,6 @@ def ema(prices, period):
     for price in prices[1:]:
         ema_val = price * k + ema_val * (1 - k)
     return ema_val
-
 
 def rsi(prices, period=14):
     gains, losses = [], []
@@ -40,10 +42,8 @@ def rsi(prices, period=14):
 
     avg_gain = sum(gains) / period
     avg_loss = sum(losses) / period if losses else 0.0001
-
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
-
 
 def fetch_market_data(coin_id):
     url = f"{COINGECKO_API}/coins/{coin_id}/market_chart"
@@ -52,11 +52,11 @@ def fetch_market_data(coin_id):
     r.raise_for_status()
     return [p[1] for p in r.json()["prices"]]
 
-
 # =====================
-# ROUTES
+# HEALTH CHECK (Important for Render)
 # =====================
-@app.get("/")
+@app.get("/health")
+@app.get("/")  # Also keep root for easy testing
 def health():
     return {
         "status": "ok",
@@ -64,16 +64,15 @@ def health():
         "supported_symbols": list(SUPPORTED_SYMBOLS.keys())
     }
 
-
+# =====================
+# ANALYZE ROUTE
+# =====================
 @app.get("/analyze")
 def analyze(symbol: str = Query(..., description="BTCUSD or ETHUSD")):
     symbol = symbol.upper()
 
     if symbol not in SUPPORTED_SYMBOLS:
-        raise HTTPException(
-            status_code=400,
-            detail="Supported symbols: BTCUSD, ETHUSD"
-        )
+        raise HTTPException(status_code=400, detail="Supported symbols: BTCUSD, ETHUSD")
 
     try:
         prices = fetch_market_data(SUPPORTED_SYMBOLS[symbol])
@@ -88,9 +87,7 @@ def analyze(symbol: str = Query(..., description="BTCUSD or ETHUSD")):
     rsi14 = rsi(prices[-(RSI_PERIOD + 1):], RSI_PERIOD)
     last_price = round(prices[-1], 2)
 
-    # =====================
-    # DECISION ENGINE
-    # =====================
+    # Decision Engine
     if ema20 > ema50 and 45 <= rsi14 <= 65:
         bias = "bullish"
         decision = "look for long entries"
@@ -119,4 +116,5 @@ def analyze(symbol: str = Query(..., description="BTCUSD or ETHUSD")):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=10000)
+    port = int(os.getenv("PORT", 10000))   # ← This is critical for Render
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
