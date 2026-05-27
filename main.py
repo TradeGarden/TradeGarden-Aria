@@ -2,6 +2,7 @@ import requests
 from fastapi import FastAPI, HTTPException, Query
 from datetime import datetime
 import os
+import time
 
 app = FastAPI(title="Aria Crypto – Layer 2A")
 
@@ -42,24 +43,26 @@ def rsi(prices, period=14):
     return round(100 - (100 / (1 + rs)), 2)
 
 def fetch_market_data(symbol: str):
-    """Fetch recent prices from Binance (more stable)"""
-    try:
-        binance_symbol = symbol.replace("USD", "USDT")
-        url = "https://api.binance.com/api/v3/klines"
-        params = {
-            "symbol": binance_symbol,
-            "interval": "1h",
-            "limit": 100
-        }
-        r = requests.get(url, params=params, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        # Extract closing prices
-        prices = [float(candle[4]) for candle in data]
-        return prices
-    except Exception as e:
-        print(f"Binance error: {e}")
-        raise HTTPException(status_code=503, detail="Market data temporarily unavailable. Try again later.")
+    """Fetch from Binance with retry"""
+    binance_symbol = symbol.replace("USD", "USDT")
+    url = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": binance_symbol, "interval": "1h", "limit": 100}
+
+    for attempt in range(3):  # Try 3 times
+        try:
+            r = requests.get(url, params=params, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            prices = [float(candle[4]) for candle in data]
+            if len(prices) < 60:
+                raise ValueError("Not enough data")
+            return prices
+        except Exception as e:
+            print(f"Attempt {attempt+1} failed: {e}")
+            time.sleep(2)  # Wait before retry
+
+    # If all fail, try fallback
+    raise HTTPException(status_code=503, detail="Market data temporarily unavailable. Try again in 1 minute.")
 
 # =====================
 # ROUTES
@@ -78,18 +81,9 @@ def analyze(symbol: str = Query(..., description="BTCUSD or ETHUSD")):
     symbol = symbol.upper()
 
     if symbol not in SUPPORTED_SYMBOLS:
-        raise HTTPException(
-            status_code=400,
-            detail="Supported symbols: BTCUSD, ETHUSD"
-        )
+        raise HTTPException(status_code=400, detail="Supported symbols: BTCUSD, ETHUSD")
 
-    try:
-        prices = fetch_market_data(symbol)
-    except Exception:
-        raise HTTPException(status_code=503, detail="Market data temporarily unavailable. Try again later.")
-
-    if len(prices) < 60:
-        raise HTTPException(status_code=503, detail="Insufficient price data")
+    prices = fetch_market_data(symbol)
 
     ema20 = round(ema(prices[-EMA_FAST:], EMA_FAST), 2)
     ema50 = round(ema(prices[-EMA_SLOW:], EMA_SLOW), 2)
