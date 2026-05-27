@@ -8,21 +8,17 @@ app = FastAPI(title="Aria Crypto – Layer 2A")
 # =====================
 # CONFIG
 # =====================
-COINGECKO_API = "https://api.coingecko.com/api/v3"
 SUPPORTED_SYMBOLS = {
-    "BTCUSD": "bitcoin",
-    "ETHUSD": "ethereum"
+    "BTCUSD": "BTCUSDT",
+    "ETHUSD": "ETHUSDT"
 }
 
 EMA_FAST = 20
 EMA_SLOW = 50
 RSI_PERIOD = 14
 
-# AI API Key (add this in Render Dashboard → Environment Variables)
-AI_API_KEY = os.getenv("AI_API_KEY")  # e.g. Grok, OpenAI, etc.
-
 # =====================
-# HELPERS (unchanged)
+# HELPERS
 # =====================
 def ema(prices, period):
     k = 2 / (period + 1)
@@ -45,18 +41,31 @@ def rsi(prices, period=14):
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
 
-def fetch_market_data(coin_id):
-    url = f"{COINGECKO_API}/coins/{coin_id}/market_chart"
-    params = {"vs_currency": "usd", "days": 2, "interval": "hourly"}
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
-    return [p[1] for p in r.json()["prices"]]
+def fetch_market_data(symbol: str):
+    """Fetch recent prices from Binance (more stable)"""
+    try:
+        binance_symbol = symbol.replace("USD", "USDT")
+        url = "https://api.binance.com/api/v3/klines"
+        params = {
+            "symbol": binance_symbol,
+            "interval": "1h",
+            "limit": 100
+        }
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        # Extract closing prices
+        prices = [float(candle[4]) for candle in data]
+        return prices
+    except Exception as e:
+        print(f"Binance error: {e}")
+        raise HTTPException(status_code=503, detail="Market data temporarily unavailable. Try again later.")
 
 # =====================
-# HEALTH CHECK (Important for Render)
+# ROUTES
 # =====================
+@app.get("/")
 @app.get("/health")
-@app.get("/")  # Also keep root for easy testing
 def health():
     return {
         "status": "ok",
@@ -64,23 +73,23 @@ def health():
         "supported_symbols": list(SUPPORTED_SYMBOLS.keys())
     }
 
-# =====================
-# ANALYZE ROUTE
-# =====================
 @app.get("/analyze")
 def analyze(symbol: str = Query(..., description="BTCUSD or ETHUSD")):
     symbol = symbol.upper()
 
     if symbol not in SUPPORTED_SYMBOLS:
-        raise HTTPException(status_code=400, detail="Supported symbols: BTCUSD, ETHUSD")
+        raise HTTPException(
+            status_code=400,
+            detail="Supported symbols: BTCUSD, ETHUSD"
+        )
 
     try:
-        prices = fetch_market_data(SUPPORTED_SYMBOLS[symbol])
+        prices = fetch_market_data(symbol)
     except Exception:
-        raise HTTPException(status_code=500, detail="Failed to fetch market data")
+        raise HTTPException(status_code=503, detail="Market data temporarily unavailable. Try again later.")
 
     if len(prices) < 60:
-        raise HTTPException(status_code=500, detail="Insufficient price data")
+        raise HTTPException(status_code=503, detail="Insufficient price data")
 
     ema20 = round(ema(prices[-EMA_FAST:], EMA_FAST), 2)
     ema50 = round(ema(prices[-EMA_SLOW:], EMA_SLOW), 2)
@@ -116,5 +125,5 @@ def analyze(symbol: str = Query(..., description="BTCUSD or ETHUSD")):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 10000))   # ← This is critical for Render
+    port = int(os.getenv("PORT", 10000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
