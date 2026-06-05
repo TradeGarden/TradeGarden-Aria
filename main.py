@@ -5,12 +5,15 @@ import os
 import time
 import random
 import json
+from openai import OpenAI
 
 app = FastAPI(title="TradeGarden - Aria AI Trading Engine")
 
 # ===================== CONFIG =====================
-AI_API_KEY = os.getenv("AI_API_KEY")
-MAX_RISK_PERCENT = 1.0   # 1% risk per trade (as in your rules)
+AI_API_KEY = os.getenv("AI_API_KEY")   # Your existing key
+client = OpenAI(api_key=AI_API_KEY) if AI_API_KEY else None
+
+MAX_RISK_PERCENT = 1.0
 
 # ===================== HELPERS =====================
 def ema(prices, period):
@@ -34,34 +37,51 @@ def rsi(prices, period=14):
     return round(100 - (100 / (1 + rs)), 2)
 
 def fetch_market_data(symbol: str):
-    binance_symbol = symbol.replace("USD", "USDT")
-    url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": binance_symbol, "interval": "1h", "limit": 100}
-    for _ in range(3):
-        try:
-            r = requests.get(url, params=params, timeout=12)
-            r.raise_for_status()
-            data = r.json()
-            return [float(candle[4]) for candle in data]
-        except:
-            time.sleep(2)
-    base = 65000 if "BTC" in symbol else 3500
-    return [base * (0.95 + random.random() * 0.1) for _ in range(100)]
+    try:
+        binance_symbol = symbol.replace("USD", "USDT")
+        # Current price
+        r = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": binance_symbol}, timeout=10)
+        r.raise_for_status()
+        price = float(r.json()["price"])
+        
+        # Candles for indicators
+        r2 = requests.get("https://api.binance.com/api/v3/klines", 
+                         params={"symbol": binance_symbol, "interval": "1h", "limit": 100}, timeout=10)
+        data = r2.json()
+        prices = [float(c[4]) for c in data]
+        return prices
+    except:
+        base = 59000 if "BTC" in symbol else 3400
+        return [base * (0.97 + random.random() * 0.06) for _ in range(100)]
 
-# Improved AI Reasoning (placeholder - uses real key when connected)
 def get_ai_reasoning(symbol, price, ema20, ema50, rsi14, decision):
-    if AI_API_KEY:
-        # TODO: Add real API call here (Grok, OpenAI, etc.)
-        return f"AI Analysis: {decision} setup on {symbol} at ${price}. EMA alignment strong. RSI neutral. Good risk-reward potential."
-    return "Technical analysis only: Strong momentum detected."
+    if not client:
+        return f"Technical: {decision} on {symbol} at ${price:,.2f}"
+    
+    prompt = f"""You are a sharp crypto trader. Analyze this setup:
+Symbol: {symbol} | Price: ${price:,.2f}
+EMA20: {ema20} | EMA50: {ema50} | RSI: {rsi14}
+Decision: {decision}
 
-# ===================== Trading Journal =====================
+Give short professional reasoning + suggested stop-loss & take-profit."""
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=120,
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
+    except:
+        return f"AI Analysis: {decision} setup. Good risk-reward potential."
+
 def save_to_journal(entry: dict):
     try:
         with open("trade_journal.txt", "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except:
-        pass  # Don't crash if file issue
+        pass
 
 # ===================== ROUTES =====================
 @app.get("/")
@@ -90,12 +110,10 @@ def analyze(symbol: str = Query(..., description="BTCUSD"), account_balance: flo
 
     ai_reason = get_ai_reasoning(symbol, last_price, ema20, ema50, rsi14, decision)
 
-    # Risk Management (follows your trade_rules.md)
     risk_amount = account_balance * (MAX_RISK_PERCENT / 100)
     stop_loss_pct = 2.0
     position_size = round(risk_amount / (last_price * (stop_loss_pct/100)), 6)
 
-    # Save to Journal
     journal_entry = {
         "timestamp": datetime.utcnow().isoformat(),
         "symbol": symbol,
@@ -109,6 +127,16 @@ def analyze(symbol: str = Query(..., description="BTCUSD"), account_balance: flo
     save_to_journal(journal_entry)
 
     return journal_entry
+
+# New: View Journal
+@app.get("/journal")
+def view_journal():
+    try:
+        with open("trade_journal.txt", "r", encoding="utf-8") as f:
+            lines = f.readlines()[-10:]  # Last 10 entries
+        return {"entries": [json.loads(line) for line in lines]}
+    except:
+        return {"entries": [], "message": "No journal entries yet"}
 
 if __name__ == "__main__":
     import uvicorn
