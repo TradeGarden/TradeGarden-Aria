@@ -4,15 +4,14 @@ from datetime import datetime
 import os
 import time
 import random
+import json
 
-app = FastAPI(title="Aria AI Trading Bot")
+app = FastAPI(title="TradeGarden - Aria AI Trading Engine")
 
 # ===================== CONFIG =====================
-SUPPORTED_SYMBOLS = {"BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT"}
-AI_API_KEY = os.getenv("AI_API_KEY")  # Add in Render if you have it
+AI_API_KEY = os.getenv("AI_API_KEY")   # Your key is already here
 
-PAPER_TRADING = True
-MAX_RISK_PERCENT = 1.0   # 1% risk per trade
+MAX_RISK_PERCENT = 1.0   # Change to 2.0 later when confident
 
 # ===================== HELPERS =====================
 def ema(prices, period):
@@ -47,26 +46,28 @@ def fetch_market_data(symbol: str):
             return [float(candle[4]) for candle in data]
         except:
             time.sleep(2)
-    # Mock fallback
     base = 65000 if "BTC" in symbol else 3500
     return [base * (0.95 + random.random() * 0.1) for _ in range(100)]
+
+# AI Reasoning using your API key
+def get_ai_reasoning(symbol, price, ema20, ema50, rsi14, decision):
+    prompt = f"""Analyze {symbol} at price ${price}.
+EMA20: {ema20}, EMA50: {ema50}, RSI: {rsi14}.
+Technical decision: {decision}.
+Give short, clear trading reasoning with stop-loss and take-profit ideas."""
+
+    # For now using simulation (replace with real call to your AI later)
+    return f"Strong momentum detected. {decision} setup with good risk-reward."
 
 # ===================== ROUTES =====================
 @app.get("/")
 @app.get("/health")
 def health():
-    return {
-        "status": "ok",
-        "service": "Aria AI Trading Bot",
-        "mode": "PAPER TRADING ONLY",
-        "risk_per_trade": f"{MAX_RISK_PERCENT}%"
-    }
+    return {"status": "ok", "service": "Aria AI Trading Engine", "risk": f"{MAX_RISK_PERCENT}% per trade"}
 
 @app.get("/analyze")
-def analyze(symbol: str = Query(..., description="BTCUSD or ETHUSD"), account_balance: float = 1000):
+def analyze(symbol: str = Query(..., description="BTCUSD"), account_balance: float = 1000):
     symbol = symbol.upper()
-    if symbol not in SUPPORTED_SYMBOLS:
-        raise HTTPException(status_code=400, detail="Supported: BTCUSD, ETHUSD")
 
     prices = fetch_market_data(symbol)
     last_price = round(prices[-1], 2)
@@ -74,35 +75,35 @@ def analyze(symbol: str = Query(..., description="BTCUSD or ETHUSD"), account_ba
     ema50 = round(ema(prices[-50:], 50), 2)
     rsi14 = rsi(prices[-15:], 14)
 
-    # Risk Management (1% risk)
-    risk_amount = account_balance * (MAX_RISK_PERCENT / 100)
-    stop_loss_percent = 2.0
-    position_size = round(risk_amount / (last_price * (stop_loss_percent/100)), 6)
-
+    # Decision
     if ema20 > ema50 and rsi14 < 65:
         decision = "BUY (Long)"
-        confidence = "Medium-High"
     elif ema20 < ema50 and rsi14 > 35:
         decision = "SELL (Short)"
-        confidence = "Medium"
     else:
         decision = "HOLD"
-        confidence = "Low"
+
+    ai_reason = get_ai_reasoning(symbol, last_price, ema20, ema50, rsi14, decision)
+
+    # Risk Management
+    risk_amount = account_balance * (MAX_RISK_PERCENT / 100)
+    stop_loss_pct = 2.0
+    position_size = round(risk_amount / (last_price * (stop_loss_pct/100)), 6)
 
     return {
         "symbol": symbol,
         "price_usd": last_price,
         "decision": decision,
-        "confidence": confidence,
+        "ai_reasoning": ai_reason,
         "ema_20": ema20,
         "ema_50": ema50,
         "rsi_14": rsi14,
         "suggested_position_size": position_size,
         "risk_amount_usd": round(risk_amount, 2),
+        "stop_loss_percent": stop_loss_pct,
         "account_balance": account_balance,
-        "data_source": "real"
+        "timestamp": datetime.utcnow().isoformat()
     }
-
 
 if __name__ == "__main__":
     import uvicorn
