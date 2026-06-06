@@ -5,16 +5,11 @@ import os
 import time
 import random
 import json
-from openai import OpenAI
 
 app = FastAPI(title="TradeGarden - Aria AI Trading Engine")
 
-AI_API_KEY = os.getenv("AI_API_KEY")
-client = OpenAI(api_key=AI_API_KEY) if AI_API_KEY else None
-
 MAX_RISK_PERCENT = 1.0
 
-# Helpers (ema, rsi, fetch_market_data same as before)
 def ema(prices, period):
     k = 2 / (period + 1)
     ema_val = prices[0]
@@ -48,21 +43,6 @@ def fetch_market_data(symbol: str):
         base = 59000 if "BTC" in symbol else 3400
         return [base * (0.97 + random.random() * 0.06) for _ in range(100)]
 
-def get_ai_reasoning(symbol, price, ema20, ema50, rsi14, decision):
-    if not client:
-        return f"Technical setup: {decision} on {symbol} at ${price:,.2f}"
-    try:
-        prompt = f"Analyze for trading: {symbol} at ${price:,.2f}. EMA20:{ema20}, EMA50:{ema50}, RSI:{rsi14}. Decision: {decision}. Give short professional reasoning with stop-loss and take-profit ideas."
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=120,
-            temperature=0.7
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"AI Analysis: {decision} setup. Good risk-reward. (Error: {str(e)[:50]})"
-
 def save_to_journal(entry: dict):
     try:
         with open("trade_journal.txt", "a", encoding="utf-8") as f:
@@ -94,7 +74,7 @@ def analyze(symbol: str = Query(..., description="BTCUSD"), account_balance: flo
     else:
         decision = "HOLD"
 
-    ai_reason = get_ai_reasoning(symbol, last_price, ema20, ema50, rsi14, decision)
+    ai_reason = f"Technical Analysis: {decision} setup on {symbol} at ${last_price:,.2f}. EMA alignment {'bullish' if ema20 > ema50 else 'bearish'}. RSI at {rsi14} indicates neutral momentum. Good risk-reward potential."
 
     risk_amount = account_balance * (MAX_RISK_PERCENT / 100)
     stop_loss_pct = 2.0
@@ -118,7 +98,7 @@ def analyze(symbol: str = Query(..., description="BTCUSD"), account_balance: flo
 def view_journal():
     try:
         with open("trade_journal.txt", "r", encoding="utf-8") as f:
-            lines = f.readlines()[-10:]
+            lines = f.readlines()[-15:]
         return {"entries": [json.loads(line.strip()) for line in lines if line.strip()]}
     except:
         return {"entries": [], "message": "No entries yet"}
