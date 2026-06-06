@@ -9,13 +9,12 @@ from openai import OpenAI
 
 app = FastAPI(title="TradeGarden - Aria AI Trading Engine")
 
-# ===================== CONFIG =====================
-AI_API_KEY = os.getenv("AI_API_KEY")   # Your existing key
+AI_API_KEY = os.getenv("AI_API_KEY")
 client = OpenAI(api_key=AI_API_KEY) if AI_API_KEY else None
 
 MAX_RISK_PERCENT = 1.0
 
-# ===================== HELPERS =====================
+# Helpers (ema, rsi, fetch_market_data same as before)
 def ema(prices, period):
     k = 2 / (period + 1)
     ema_val = prices[0]
@@ -39,33 +38,21 @@ def rsi(prices, period=14):
 def fetch_market_data(symbol: str):
     try:
         binance_symbol = symbol.replace("USD", "USDT")
-        # Current price
         r = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": binance_symbol}, timeout=10)
         r.raise_for_status()
         price = float(r.json()["price"])
-        
-        # Candles for indicators
-        r2 = requests.get("https://api.binance.com/api/v3/klines", 
-                         params={"symbol": binance_symbol, "interval": "1h", "limit": 100}, timeout=10)
+        r2 = requests.get("https://api.binance.com/api/v3/klines", params={"symbol": binance_symbol, "interval": "1h", "limit": 100}, timeout=10)
         data = r2.json()
-        prices = [float(c[4]) for c in data]
-        return prices
+        return [float(c[4]) for c in data]
     except:
         base = 59000 if "BTC" in symbol else 3400
         return [base * (0.97 + random.random() * 0.06) for _ in range(100)]
 
 def get_ai_reasoning(symbol, price, ema20, ema50, rsi14, decision):
     if not client:
-        return f"Technical: {decision} on {symbol} at ${price:,.2f}"
-    
-    prompt = f"""You are a sharp crypto trader. Analyze this setup:
-Symbol: {symbol} | Price: ${price:,.2f}
-EMA20: {ema20} | EMA50: {ema50} | RSI: {rsi14}
-Decision: {decision}
-
-Give short professional reasoning + suggested stop-loss & take-profit."""
-    
+        return f"Technical setup: {decision} on {symbol} at ${price:,.2f}"
     try:
+        prompt = f"Analyze for trading: {symbol} at ${price:,.2f}. EMA20:{ema20}, EMA50:{ema50}, RSI:{rsi14}. Decision: {decision}. Give short professional reasoning with stop-loss and take-profit ideas."
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
@@ -73,8 +60,8 @@ Give short professional reasoning + suggested stop-loss & take-profit."""
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
-    except:
-        return f"AI Analysis: {decision} setup. Good risk-reward potential."
+    except Exception as e:
+        return f"AI Analysis: {decision} setup. Good risk-reward. (Error: {str(e)[:50]})"
 
 def save_to_journal(entry: dict):
     try:
@@ -83,7 +70,6 @@ def save_to_journal(entry: dict):
     except:
         pass
 
-# ===================== ROUTES =====================
 @app.get("/")
 @app.get("/health")
 def health():
@@ -128,15 +114,14 @@ def analyze(symbol: str = Query(..., description="BTCUSD"), account_balance: flo
 
     return journal_entry
 
-# New: View Journal
 @app.get("/journal")
 def view_journal():
     try:
         with open("trade_journal.txt", "r", encoding="utf-8") as f:
-            lines = f.readlines()[-10:]  # Last 10 entries
-        return {"entries": [json.loads(line) for line in lines]}
+            lines = f.readlines()[-10:]
+        return {"entries": [json.loads(line.strip()) for line in lines if line.strip()]}
     except:
-        return {"entries": [], "message": "No journal entries yet"}
+        return {"entries": [], "message": "No entries yet"}
 
 if __name__ == "__main__":
     import uvicorn
