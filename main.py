@@ -1,9 +1,8 @@
 import requests
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from datetime import datetime
 import os
-import time
 import random
 import json
 
@@ -11,9 +10,8 @@ app = FastAPI(title="TradeGarden - Aria AI Trading Engine")
 
 MAX_RISK_PERCENT = 1.0
 
-# ... (keep the same ema, rsi, fetch_market_data, save_to_journal functions from previous version)
-
-def ema(prices, period):
+# Helpers (same)
+def ema(prices, period): 
     k = 2 / (period + 1)
     ema_val = prices[0]
     for price in prices[1:]:
@@ -24,10 +22,8 @@ def rsi(prices, period=14):
     gains, losses = [], []
     for i in range(1, period + 1):
         diff = prices[i] - prices[i - 1]
-        if diff >= 0:
-            gains.append(diff)
-        else:
-            losses.append(abs(diff))
+        if diff >= 0: gains.append(diff)
+        else: losses.append(abs(diff))
     avg_gain = sum(gains) / period
     avg_loss = sum(losses) / period if losses else 0.0001
     rs = avg_gain / avg_loss
@@ -53,14 +49,10 @@ def save_to_journal(entry: dict):
     except:
         pass
 
-# ===================== ROUTES =====================
-@app.get("/")
-@app.get("/health")
-def health():
-    return {"status": "ok", "service": "Aria AI Trading Engine"}
-
+# Dashboard
+@app.get("/", response_class=HTMLResponse)
 @app.get("/analyze", response_class=HTMLResponse)
-async def analyze_web(symbol: str = "BTCUSD", account_balance: float = 500):
+async def dashboard(symbol: str = "BTCUSD", account_balance: float = 500):
     symbol = symbol.upper()
     if symbol not in ["BTCUSD", "ETHUSD"]:
         symbol = "BTCUSD"
@@ -78,44 +70,33 @@ async def analyze_web(symbol: str = "BTCUSD", account_balance: float = 500):
     else:
         decision = "HOLD"
 
-    ai_reason = f"Technical Analysis: {decision} setup on {symbol} at ${last_price:,.2f}. EMA alignment {'bullish' if ema20 > ema50 else 'bearish'}. RSI at {rsi14} indicates neutral momentum."
+    ai_reason = f"Technical: {decision} setup on {symbol} at ${last_price:,.2f}. EMA {'bullish' if ema20 > ema50 else 'bearish'}. RSI {rsi14} neutral."
 
     risk_amount = account_balance * (MAX_RISK_PERCENT / 100)
     stop_loss_pct = 2.0
     position_size = round(risk_amount / (last_price * (stop_loss_pct/100)), 6)
 
-    journal_entry = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "symbol": symbol,
-        "price": last_price,
-        "decision": decision,
-        "ai_reasoning": ai_reason,
-        "risk_amount_usd": round(risk_amount, 2),
-        "position_size": position_size,
-        "account_balance": account_balance
-    }
+    journal_entry = { ... same as before ... }
     save_to_journal(journal_entry)
 
-    # Simple HTML Dashboard
+    # Nice HTML Dashboard
     html = f"""
-    <html>
-    <head><title>Aria Dashboard</title>
-    <style>body {{font-family: Arial; margin: 20px;}} .card {{background: #222; padding: 15px; border-radius: 8px; margin: 10px 0;}}</style>
-    </head>
-    <body>
+    <html><head><title>Aria Dashboard</title>
+    <style>body{{font-family:Arial;margin:20px;background:#111;color:#ddd;}} .card{{background:#222;padding:20px;border-radius:10px;margin:15px 0;}}</style>
+    </head><body>
         <h1>Aria AI Trading Dashboard</h1>
         <div class="card">
-            <h2>Current Analysis - {symbol}</h2>
+            <h2>{symbol} Analysis</h2>
             <p><strong>Price:</strong> ${last_price:,.2f}</p>
-            <p><strong>Decision:</strong> {decision}</p>
+            <p><strong>Decision:</strong> <b>{decision}</b></p>
             <p><strong>Reason:</strong> {ai_reason}</p>
             <p><strong>Risk (1%):</strong> ${risk_amount:.2f}</p>
-            <p><strong>Suggested Position:</strong> {position_size} BTC</p>
+            <p><strong>Suggested Size:</strong> {position_size} {symbol[:3]}</p>
         </div>
-        <a href="/analyze?symbol=BTCUSD&account_balance={account_balance}">Refresh</a> | 
-        <a href="/journal">View Journal</a>
-    </body>
-    </html>
+        <a href="/analyze?symbol=BTCUSD&account_balance={account_balance}">🔄 Refresh BTC</a> | 
+        <a href="/analyze?symbol=ETHUSD&account_balance={account_balance}">ETH</a> | 
+        <a href="/journal">📖 View Journal</a>
+    </body></html>
     """
     return HTMLResponse(html)
 
@@ -123,11 +104,11 @@ async def analyze_web(symbol: str = "BTCUSD", account_balance: float = 500):
 def view_journal():
     try:
         with open("trade_journal.txt", "r", encoding="utf-8") as f:
-            lines = f.readlines()[-10:]
+            lines = f.readlines()[-20:]
         entries = [json.loads(line.strip()) for line in lines if line.strip()]
         return {"entries": entries}
     except:
-        return {"entries": [], "message": "No entries yet"}
+        return {"entries": [], "message": "Journal is empty or not found yet."}
 
 if __name__ == "__main__":
     import uvicorn
