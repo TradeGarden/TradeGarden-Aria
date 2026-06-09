@@ -2,7 +2,6 @@ import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from datetime import datetime
-import os
 import random
 import json
 
@@ -10,8 +9,7 @@ app = FastAPI(title="TradeGarden - Aria AI Trading Engine")
 
 MAX_RISK_PERCENT = 1.0
 
-# Helpers (same)
-def ema(prices, period): 
+def ema(prices, period):
     k = 2 / (period + 1)
     ema_val = prices[0]
     for price in prices[1:]:
@@ -22,8 +20,10 @@ def rsi(prices, period=14):
     gains, losses = [], []
     for i in range(1, period + 1):
         diff = prices[i] - prices[i - 1]
-        if diff >= 0: gains.append(diff)
-        else: losses.append(abs(diff))
+        if diff >= 0:
+            gains.append(diff)
+        else:
+            losses.append(abs(diff))
     avg_gain = sum(gains) / period
     avg_loss = sum(losses) / period if losses else 0.0001
     rs = avg_gain / avg_loss
@@ -49,8 +49,7 @@ def save_to_journal(entry: dict):
     except:
         pass
 
-# Dashboard
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 @app.get("/analyze", response_class=HTMLResponse)
 async def dashboard(symbol: str = "BTCUSD", account_balance: float = 500):
     symbol = symbol.upper()
@@ -76,10 +75,18 @@ async def dashboard(symbol: str = "BTCUSD", account_balance: float = 500):
     stop_loss_pct = 2.0
     position_size = round(risk_amount / (last_price * (stop_loss_pct/100)), 6)
 
-    journal_entry = { ... same as before ... }
+    journal_entry = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "symbol": symbol,
+        "price": last_price,
+        "decision": decision,
+        "ai_reasoning": ai_reason,
+        "risk_amount_usd": round(risk_amount, 2),
+        "position_size": position_size,
+        "account_balance": account_balance
+    }
     save_to_journal(journal_entry)
 
-    # Nice HTML Dashboard
     html = f"""
     <html><head><title>Aria Dashboard</title>
     <style>body{{font-family:Arial;margin:20px;background:#111;color:#ddd;}} .card{{background:#222;padding:20px;border-radius:10px;margin:15px 0;}}</style>
@@ -93,9 +100,9 @@ async def dashboard(symbol: str = "BTCUSD", account_balance: float = 500):
             <p><strong>Risk (1%):</strong> ${risk_amount:.2f}</p>
             <p><strong>Suggested Size:</strong> {position_size} {symbol[:3]}</p>
         </div>
-        <a href="/analyze?symbol=BTCUSD&account_balance={account_balance}">🔄 Refresh BTC</a> | 
+        <p><a href="/analyze?symbol=BTCUSD&account_balance={account_balance}">🔄 Refresh BTC</a> | 
         <a href="/analyze?symbol=ETHUSD&account_balance={account_balance}">ETH</a> | 
-        <a href="/journal">📖 View Journal</a>
+        <a href="/journal">📖 View Journal</a></p>
     </body></html>
     """
     return HTMLResponse(html)
@@ -108,7 +115,7 @@ def view_journal():
         entries = [json.loads(line.strip()) for line in lines if line.strip()]
         return {"entries": entries}
     except:
-        return {"entries": [], "message": "Journal is empty or not found yet."}
+        return {"entries": [], "message": "No entries yet"}
 
 if __name__ == "__main__":
     import uvicorn
