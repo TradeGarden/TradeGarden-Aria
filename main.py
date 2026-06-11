@@ -22,7 +22,7 @@ def load_balance():
 def save_balance(balance):
     try:
         with open("paper_balance.txt", "w") as f:
-            f.write(str(balance))
+            f.write(str(round(balance, 2)))
     except:
         pass
 
@@ -73,13 +73,14 @@ async def dashboard(symbol: str = "BTCUSD"):
 
     current_price = fetch_market_data(symbol)
 
-    # Calculate P/L if position open
+    # Calculate unrealized P/L if position open
     pl = 0
     pl_percent = 0
     if position and position["symbol"] == symbol:
         entry_price = position["entry_price"]
-        pl = (current_price - entry_price) * position["size"] if position["side"] == "BUY" else (entry_price - current_price) * position["size"]
-        pl_percent = (pl / position["risk_amount"]) * 100
+        size = position["size"]
+        pl = (current_price - entry_price) * size if position["side"] == "BUY" else (entry_price - current_price) * size
+        pl_percent = (pl / position["risk_amount"]) * 100 if position["risk_amount"] > 0 else 0
 
     decision = "BUY (Long)" if random.random() > 0.5 else "SELL (Short)"
     reason = f"Technical: {decision} setup on {symbol} at ${current_price:,.2f}."
@@ -101,7 +102,7 @@ async def dashboard(symbol: str = "BTCUSD"):
             <p><strong>Suggested Size:</strong> {position_size} {symbol[:3]}</p>
             <p><strong>Paper Balance:</strong> ${balance:,.2f}</p>
         </div>
-        {f'<div class="card"><h3>Open Position</h3><p>Side: {position["side"]}</p><p>Entry: ${position["entry_price"]}</p><p>Unrealized P/L: ${pl:.2f} ({pl_percent:.1f}%)</p></div>' if position else ''}
+        {f'<div class="card"><h3>🟢 Open Position</h3><p>Side: {position["side"]}</p><p>Entry Price: ${position["entry_price"]}</p><p>Unrealized P/L: ${pl:.2f} ({pl_percent:.1f}%)</p></div>' if position else '<div class="card"><p>No open position</p></div>'}
         <p><a href="/analyze?symbol=BTCUSD">🔄 Refresh BTC</a> | 
         <a href="/analyze?symbol=ETHUSD">ETH</a> | 
         <a href="/journal">📖 View Journal</a></p>
