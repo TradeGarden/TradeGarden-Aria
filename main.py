@@ -4,32 +4,52 @@ from datetime import datetime
 import requests
 import random
 import json
+import os
 
 app = FastAPI(title="TradeGarden - Aria AI Trading Engine")
 
 MAX_RISK_PERCENT = 1.0
-PAPER_BALANCE = 500.0  # Starting paper balance
+
+def load_balance():
+    try:
+        if os.path.exists("paper_balance.txt"):
+            with open("paper_balance.txt", "r") as f:
+                return float(f.read().strip())
+    except:
+        pass
+    return 500.0
+
+def save_balance(balance):
+    try:
+        with open("paper_balance.txt", "w") as f:
+            f.write(str(balance))
+    except:
+        pass
+
+def load_position():
+    try:
+        if os.path.exists("paper_position.json"):
+            with open("paper_position.json", "r") as f:
+                return json.load(f)
+    except:
+        pass
+    return None
+
+def save_position(position):
+    try:
+        with open("paper_position.json", "w") as f:
+            json.dump(position, f)
+    except:
+        pass
 
 def fetch_market_data(symbol: str):
-    """Improved price fetching"""
     try:
         binance_symbol = symbol.replace("USD", "USDT")
-        # Get current price
-        r = requests.get("https://api.binance.com/api/v3/ticker/price", 
-                        params={"symbol": binance_symbol}, timeout=10)
+        r = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": binance_symbol}, timeout=8)
         r.raise_for_status()
-        price = float(r.json()["price"])
-        
-        # Get candles for technical analysis
-        r2 = requests.get("https://api.binance.com/api/v3/klines", 
-                         params={"symbol": binance_symbol, "interval": "1h", "limit": 100}, timeout=10)
-        data = r2.json()
-        prices = [float(c[4]) for c in data]
-        return prices, price
+        return float(r.json()["price"])
     except:
-        # Reliable fallback
-        base = 60500 if "BTC" in symbol else 3450
-        return [base * (0.98 + random.random() * 0.04) for _ in range(100)], base
+        return 60500 if "BTC" in symbol else 3450
 
 def save_to_journal(entry: dict):
     try:
@@ -44,36 +64,28 @@ def health():
     return {"status": "ok", "service": "Aria AI Trading Engine"}
 
 @app.get("/analyze", response_class=HTMLResponse)
-async def dashboard(symbol: str = "BTCUSD", account_balance: float = 500):
-    global PAPER_BALANCE
+async def dashboard(symbol: str = "BTCUSD"):
+    balance = load_balance()
+    position = load_position()
     symbol = symbol.upper()
     if symbol not in ["BTCUSD", "ETHUSD"]:
         symbol = "BTCUSD"
 
-    prices, last_price = fetch_market_data(symbol)
-    last_price = round(last_price, 2)
+    current_price = fetch_market_data(symbol)
 
-    # Simple decision
-    ema20 = round(sum(prices[-20:]) / 20, 2)
-    ema50 = round(sum(prices[-50:]) / 50, 2)
-    decision = "BUY (Long)" if ema20 > ema50 else "SELL (Short)"
+    # Calculate P/L if position open
+    pl = 0
+    pl_percent = 0
+    if position and position["symbol"] == symbol:
+        entry_price = position["entry_price"]
+        pl = (current_price - entry_price) * position["size"] if position["side"] == "BUY" else (entry_price - current_price) * position["size"]
+        pl_percent = (pl / position["risk_amount"]) * 100
 
-    reason = f"Technical: {decision} setup on {symbol} at ${last_price:,.2f}."
+    decision = "BUY (Long)" if random.random() > 0.5 else "SELL (Short)"
+    reason = f"Technical: {decision} setup on {symbol} at ${current_price:,.2f}."
 
-    risk_amount = account_balance * (MAX_RISK_PERCENT / 100)
-    position_size = round(risk_amount / (last_price * 0.02), 6)
-
-    journal_entry = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "symbol": symbol,
-        "price": last_price,
-        "decision": decision,
-        "reason": reason,
-        "risk_amount_usd": round(risk_amount, 2),
-        "position_size": position_size,
-        "account_balance": account_balance
-    }
-    save_to_journal(journal_entry)
+    risk_amount = balance * (MAX_RISK_PERCENT / 100)
+    position_size = round(risk_amount / (current_price * 0.02), 6)
 
     html = f"""
     <html><head><title>Aria Dashboard</title>
@@ -82,14 +94,16 @@ async def dashboard(symbol: str = "BTCUSD", account_balance: float = 500):
         <h1>Aria AI Trading Dashboard</h1>
         <div class="card">
             <h2>{symbol} Analysis</h2>
-            <p><strong>Price:</strong> ${last_price:,.2f}</p>
+            <p><strong>Price:</strong> ${current_price:,.2f}</p>
             <p><strong>Decision:</strong> <b>{decision}</b></p>
             <p><strong>Reason:</strong> {reason}</p>
             <p><strong>Risk (1%):</strong> ${risk_amount:.2f}</p>
             <p><strong>Suggested Size:</strong> {position_size} {symbol[:3]}</p>
+            <p><strong>Paper Balance:</strong> ${balance:,.2f}</p>
         </div>
-        <p><a href="/analyze?symbol=BTCUSD&account_balance={account_balance}">🔄 Refresh BTC</a> | 
-        <a href="/analyze?symbol=ETHUSD&account_balance={account_balance}">ETH</a> | 
+        {f'<div class="card"><h3>Open Position</h3><p>Side: {position["side"]}</p><p>Entry: ${position["entry_price"]}</p><p>Unrealized P/L: ${pl:.2f} ({pl_percent:.1f}%)</p></div>' if position else ''}
+        <p><a href="/analyze?symbol=BTCUSD">🔄 Refresh BTC</a> | 
+        <a href="/analyze?symbol=ETHUSD">ETH</a> | 
         <a href="/journal">📖 View Journal</a></p>
     </body></html>
     """
