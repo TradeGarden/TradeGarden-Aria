@@ -2,7 +2,6 @@ from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 from datetime import datetime
 import requests
-import random
 import json
 import os
 
@@ -45,7 +44,7 @@ def save_position(position):
 def fetch_market_data(symbol: str):
     try:
         binance_symbol = symbol.replace("USD", "USDT")
-        r = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": binance_symbol}, timeout=8)
+        r = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": binance_symbol}, timeout=10)
         r.raise_for_status()
         return float(r.json()["price"])
     except:
@@ -102,12 +101,12 @@ async def dashboard(symbol: str = "BTCUSD"):
             <p><strong>Suggested Size:</strong> {position_size} {symbol[:3]}</p>
             <p><strong>Paper Balance:</strong> ${balance:,.2f}</p>
         </div>
-        {f'<div class="card"><h3>🟢 Open Position</h3><p>Side: {position["side"]}</p><p>Entry: ${position["entry_price"]}</p><p>P/L: ${pl:.2f} ({pl_percent:.1f}%)</p></div>' if position else '<div class="card"><p>No open position</p></div>'}
+        {f'<div class="card"><h3>🟢 Open Position</h3><p>Side: {position["side"]}</p><p>Entry: ${position["entry_price"]}</p><p>Unrealized P/L: ${pl:.2f} ({pl_percent:.1f}%)</p></div>' if position else '<div class="card"><p>No open position</p></div>'}
         <p>
             <a href="/execute?symbol={symbol}&side=BUY">🟢 Execute BUY</a> | 
-            <a href="/execute?symbol={symbol}&side=SELL">🔴 Execute SELL</a> | 
-            <a href="/analyze?symbol=BTCUSD">Refresh</a> | 
-            <a href="/journal">View Journal</a>
+            <a href="/execute?symbol={symbol}&side=SELL">🔴 Execute SELL</a><br>
+            <a href="/analyze?symbol=BTCUSD">🔄 Refresh</a> | 
+            <a href="/journal">📖 View Journal</a>
         </p>
     </body></html>
     """
@@ -115,7 +114,6 @@ async def dashboard(symbol: str = "BTCUSD"):
 
 @app.get("/execute")
 async def execute_trade(symbol: str = Query(...), side: str = Query(...)):
-    global balance  # not used directly
     balance = load_balance()
     current_price = fetch_market_data(symbol)
     risk_amount = balance * (MAX_RISK_PERCENT / 100)
@@ -131,9 +129,9 @@ async def execute_trade(symbol: str = Query(...), side: str = Query(...)):
     }
     save_position(position)
 
-    save_to_journal({"action": "EXECUTE", "symbol": symbol, "side": side, "price": current_price, "size": size, "timestamp": datetime.utcnow().isoformat()})
+    save_to_journal({"action": "EXECUTE_TRADE", "symbol": symbol, "side": side, "price": current_price, "size": size, "timestamp": datetime.utcnow().isoformat()})
 
-    return HTMLResponse(f"<h2>Paper Trade Executed: {side} {size} {symbol} at ${current_price:,.2f}</h2><p><a href='/analyze'>Back to Dashboard</a></p>")
+    return HTMLResponse(f"<h2>✅ Paper Trade Executed: {side} {size} {symbol} at ${current_price:,.2f}</h2><p><a href='/analyze'>← Back to Dashboard</a></p>")
 
 @app.get("/journal")
 def view_journal():
