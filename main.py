@@ -128,7 +128,7 @@ async def execute_trade(symbol: str = Query(...), side: str = Query(...)):
         "timestamp": datetime.utcnow().isoformat()
     }
     save_position(position)
-    save_to_journal({"action": "EXECUTE", "symbol": symbol, "side": side, "price": current_price, "size": size, "timestamp": datetime.utcnow().isoformat()})
+    save_to_journal({"action": "EXECUTE_TRADE", "symbol": symbol, "side": side, "price": current_price, "size": size, "timestamp": datetime.utcnow().isoformat()})
 
     return HTMLResponse(f"<h2>✅ Paper Trade Executed: {side} {size} {symbol} at ${current_price:,.2f}</h2><p><a href='/analyze'>← Back to Dashboard</a></p>")
 
@@ -136,7 +136,7 @@ async def execute_trade(symbol: str = Query(...), side: str = Query(...)):
 def view_journal():
     try:
         with open("trade_journal.txt", "r", encoding="utf-8") as f:
-            lines = f.readlines()[-20:]
+            lines = f.readlines()[-30:]
         entries = [json.loads(line.strip()) for line in lines if line.strip()]
         return {"entries": entries}
     except:
