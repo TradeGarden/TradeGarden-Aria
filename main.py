@@ -53,17 +53,17 @@ def fetch_market_data(symbol: str):
         r.raise_for_status()
         return float(r.json()[coin]["usd"])
     except:
-        return 64500 if "BTC" in symbol else 3450
+        return 64500 if "BTC" in symbol else 3450   # fallback
 
 def get_ai_reasoning(symbol, price, decision):
     if not client:
         return f"Technical: {decision} setup on {symbol} at ${price:,.2f}."
     try:
-        prompt = f"Give short professional trading reasoning for {symbol} at ${price:,.2f}. Decision: {decision}. Include suggested stop-loss and take-profit ideas."
+        prompt = f"Short professional trading reasoning for {symbol} at ${price:,.2f}. Decision: {decision}. Include stop-loss and take-profit ideas."
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=120,
+            max_tokens=100,
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
@@ -120,7 +120,7 @@ async def dashboard(symbol: str = "BTCUSD"):
             <p><strong>Suggested Size:</strong> {position_size} {symbol[:3]}</p>
             <p><strong>Paper Balance:</strong> ${balance:,.2f}</p>
         </div>
-        {f'<div class="card"><h3>🟢 Open Position</h3><p>Side: {position["side"]}</p><p>Entry: ${position["entry_price"]}</p><p>P/L: ${pl:.2f} ({pl_percent:.1f}%)</p></div>' if position else '<div class="card"><p>No open position</p></div>'}
+        {f'<div class="card"><h3>🟢 Open Position</h3><p>Side: {position["side"]}</p><p>Entry: ${position["entry_price"]}</p><p>P/L: ${pl:.2f} ({pl_percent:.1f}%)</p><a href="/close">Close Position</a></div>' if position else '<div class="card"><p>No open position</p></div>'}
         <p>
             <a href="/execute?symbol={symbol}&side=BUY">🟢 Execute BUY</a> | 
             <a href="/execute?symbol={symbol}&side=SELL">🔴 Execute SELL</a><br>
@@ -150,7 +150,16 @@ async def execute_trade(symbol: str = Query(...), side: str = Query(...)):
     save_position(position)
     save_to_journal({"action": "EXECUTE_TRADE", "symbol": symbol, "side": side, "price": current_price, "size": size, "timestamp": datetime.utcnow().isoformat()})
 
-    return HTMLResponse(f"<h2>✅ Paper Trade Executed: {side} {size} {symbol} at ${current_price:,.2f}</h2><p><a href='/analyze'>← Back to Dashboard</a></p>")
+    return HTMLResponse(f"<h2>✅ Paper Trade Executed: {side} {size} {symbol}</h2><p><a href='/analyze'>← Back to Dashboard</a></p>")
+
+@app.get("/close")
+async def close_position():
+    position = load_position()
+    if position:
+        save_position(None)  # close position
+        save_to_journal({"action": "CLOSE_POSITION", "symbol": position["symbol"], "timestamp": datetime.utcnow().isoformat()})
+        return HTMLResponse(f"<h2>✅ Position Closed</h2><p><a href='/analyze'>← Back to Dashboard</a></p>")
+    return HTMLResponse("<h2>No position to close</h2><p><a href='/analyze'>Back</a></p>")
 
 @app.get("/journal")
 def view_journal():
