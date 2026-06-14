@@ -105,7 +105,8 @@ async def dashboard(symbol: str = "BTCUSD"):
         <p>
             <a href="/execute?symbol={symbol}&side=BUY">🟢 Execute BUY</a> | 
             <a href="/execute?symbol={symbol}&side=SELL">🔴 Execute SELL</a><br>
-            <a href="/analyze?symbol=BTCUSD">🔄 Refresh</a> | 
+            <a href="/analyze?symbol=BTCUSD">🔄 Refresh BTC</a> | 
+            <a href="/analyze?symbol=ETHUSD">ETH</a> | 
             <a href="/journal">📖 View Journal</a>
         </p>
     </body></html>
