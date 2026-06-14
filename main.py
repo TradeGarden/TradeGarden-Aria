@@ -73,7 +73,7 @@ async def dashboard(symbol: str = "BTCUSD"):
 
     current_price = fetch_market_data(symbol)
 
-    # Calculate unrealized P/L if position open
+    # Unrealized P/L
     pl = 0
     pl_percent = 0
     if position and position["symbol"] == symbol:
@@ -102,13 +102,38 @@ async def dashboard(symbol: str = "BTCUSD"):
             <p><strong>Suggested Size:</strong> {position_size} {symbol[:3]}</p>
             <p><strong>Paper Balance:</strong> ${balance:,.2f}</p>
         </div>
-        {f'<div class="card"><h3>🟢 Open Position</h3><p>Side: {position["side"]}</p><p>Entry Price: ${position["entry_price"]}</p><p>Unrealized P/L: ${pl:.2f} ({pl_percent:.1f}%)</p></div>' if position else '<div class="card"><p>No open position</p></div>'}
-        <p><a href="/analyze?symbol=BTCUSD">🔄 Refresh BTC</a> | 
-        <a href="/analyze?symbol=ETHUSD">ETH</a> | 
-        <a href="/journal">📖 View Journal</a></p>
+        {f'<div class="card"><h3>🟢 Open Position</h3><p>Side: {position["side"]}</p><p>Entry: ${position["entry_price"]}</p><p>P/L: ${pl:.2f} ({pl_percent:.1f}%)</p></div>' if position else '<div class="card"><p>No open position</p></div>'}
+        <p>
+            <a href="/execute?symbol={symbol}&side=BUY">🟢 Execute BUY</a> | 
+            <a href="/execute?symbol={symbol}&side=SELL">🔴 Execute SELL</a> | 
+            <a href="/analyze?symbol=BTCUSD">Refresh</a> | 
+            <a href="/journal">View Journal</a>
+        </p>
     </body></html>
     """
     return HTMLResponse(html)
+
+@app.get("/execute")
+async def execute_trade(symbol: str = Query(...), side: str = Query(...)):
+    global balance  # not used directly
+    balance = load_balance()
+    current_price = fetch_market_data(symbol)
+    risk_amount = balance * (MAX_RISK_PERCENT / 100)
+    size = round(risk_amount / (current_price * 0.02), 6)
+
+    position = {
+        "symbol": symbol,
+        "side": side,
+        "entry_price": current_price,
+        "size": size,
+        "risk_amount": risk_amount,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    save_position(position)
+
+    save_to_journal({"action": "EXECUTE", "symbol": symbol, "side": side, "price": current_price, "size": size, "timestamp": datetime.utcnow().isoformat()})
+
+    return HTMLResponse(f"<h2>Paper Trade Executed: {side} {size} {symbol} at ${current_price:,.2f}</h2><p><a href='/analyze'>Back to Dashboard</a></p>")
 
 @app.get("/journal")
 def view_journal():
