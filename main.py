@@ -49,7 +49,14 @@ def fetch_market_data(symbol: str):
         r.raise_for_status()
         return float(r.json()[coin]["usd"])
     except:
-        return 64509 if "BTC" in symbol else 3450
+        return 64500 if "BTC" in symbol else 3450
+
+def save_to_journal(entry: dict):
+    try:
+        with open("trade_journal.txt", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except:
+        pass
 
 @app.get("/health")
 @app.get("/")
@@ -123,7 +130,7 @@ async def execute_trade(symbol: str = Query(...), side: str = Query(...)):
     save_position(position)
     save_to_journal({"action": "EXECUTE", "symbol": symbol, "side": side, "price": current_price, "size": size, "timestamp": datetime.utcnow().isoformat()})
 
-    return HTMLResponse(f"<h2>✅ Paper Trade Executed: {side} {size} {symbol}</h2><p><a href='/analyze'>← Back to Dashboard</a></p>")
+    return HTMLResponse(f"<h2>✅ Paper Trade Executed: {side} {size} {symbol} at ${current_price:,.2f}</h2><p><a href='/analyze'>← Back to Dashboard</a></p>")
 
 @app.get("/journal")
 def view_journal():
