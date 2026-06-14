@@ -47,21 +47,19 @@ def save_position(position):
         pass
 
 def fetch_market_data(symbol: str):
-    """Reliable price fetching"""
     try:
         coin = "bitcoin" if "BTC" in symbol else "ethereum"
         r = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd", timeout=12)
         r.raise_for_status()
         return float(r.json()[coin]["usd"])
     except:
-        # Better fallback using last known good price
         return 64500 if "BTC" in symbol else 3450
 
 def get_ai_reasoning(symbol, price, decision):
     if not client:
         return f"Technical: {decision} setup on {symbol} at ${price:,.2f}."
     try:
-        prompt = f"Short professional crypto trading reasoning for {symbol} at ${price:,.2f}. Decision: {decision}. Include stop-loss and take-profit ideas."
+        prompt = f"Short professional trading reasoning for {symbol} at ${price:,.2f}. Decision: {decision}."
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
@@ -82,7 +80,7 @@ def save_to_journal(entry: dict):
 @app.get("/health")
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "Aria AI Trading Engine", "ai": "Connected" if client else "Technical only"}
+    return {"status": "ok", "service": "Aria AI Trading Engine"}
 
 @app.get("/analyze", response_class=HTMLResponse)
 async def dashboard(symbol: str = "BTCUSD"):
