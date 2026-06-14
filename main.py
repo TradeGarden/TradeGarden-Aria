@@ -5,8 +5,12 @@ import requests
 import random
 import json
 import os
+from openai import OpenAI
 
 app = FastAPI(title="TradeGarden - Aria AI Trading Engine")
+
+AI_API_KEY = os.getenv("AI_API_KEY")
+client = OpenAI(api_key=AI_API_KEY) if AI_API_KEY else None
 
 MAX_RISK_PERCENT = 1.0
 
@@ -51,6 +55,21 @@ def fetch_market_data(symbol: str):
     except:
         return 64500 if "BTC" in symbol else 3450
 
+def get_ai_reasoning(symbol, price, decision):
+    if not client:
+        return f"Technical: {decision} setup on {symbol} at ${price:,.2f}."
+    try:
+        prompt = f"Give short professional trading reasoning for {symbol} at ${price:,.2f}. Decision: {decision}. Include suggested stop-loss and take-profit ideas."
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=120,
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
+    except:
+        return f"Technical: {decision} setup on {symbol} at ${price:,.2f}."
+
 def save_to_journal(entry: dict):
     try:
         with open("trade_journal.txt", "a", encoding="utf-8") as f:
@@ -82,7 +101,7 @@ async def dashboard(symbol: str = "BTCUSD"):
         pl_percent = (pl / position["risk_amount"]) * 100 if position["risk_amount"] > 0 else 0
 
     decision = "BUY (Long)" if random.random() > 0.5 else "SELL (Short)"
-    reason = f"Technical: {decision} setup on {symbol} at ${current_price:,.2f}."
+    ai_reason = get_ai_reasoning(symbol, current_price, decision)
 
     risk_amount = balance * (MAX_RISK_PERCENT / 100)
     position_size = round(risk_amount / (current_price * 0.02), 6)
@@ -96,7 +115,7 @@ async def dashboard(symbol: str = "BTCUSD"):
             <h2>{symbol} Analysis</h2>
             <p><strong>Price:</strong> ${current_price:,.2f}</p>
             <p><strong>Decision:</strong> <b>{decision}</b></p>
-            <p><strong>Reason:</strong> {reason}</p>
+            <p><strong>AI Reason:</strong> {ai_reason}</p>
             <p><strong>Risk (1%):</strong> ${risk_amount:.2f}</p>
             <p><strong>Suggested Size:</strong> {position_size} {symbol[:3]}</p>
             <p><strong>Paper Balance:</strong> ${balance:,.2f}</p>
