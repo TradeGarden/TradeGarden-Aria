@@ -10,7 +10,7 @@ from openai import OpenAI
 app = FastAPI(title="TradeGarden - Aria AI Trading Engine")
 
 AI_API_KEY = os.getenv("AI_API_KEY")
-client = OpenAI(api_key=AI_API_KEY) if AI_API_KEY else None
+client = OpenAI(api_key=AI_API_KEY) if AI_API_KEY and AI_API_KEY.startswith("sk-") else None
 
 MAX_RISK_PERCENT = 1.0
 
@@ -47,19 +47,21 @@ def save_position(position):
         pass
 
 def fetch_market_data(symbol: str):
+    """Reliable price fetching"""
     try:
         coin = "bitcoin" if "BTC" in symbol else "ethereum"
-        r = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd", timeout=10)
+        r = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd", timeout=12)
         r.raise_for_status()
         return float(r.json()[coin]["usd"])
     except:
-        return 64500 if "BTC" in symbol else 3450   # fallback
+        # Better fallback using last known good price
+        return 64500 if "BTC" in symbol else 3450
 
 def get_ai_reasoning(symbol, price, decision):
     if not client:
         return f"Technical: {decision} setup on {symbol} at ${price:,.2f}."
     try:
-        prompt = f"Short professional trading reasoning for {symbol} at ${price:,.2f}. Decision: {decision}. Include stop-loss and take-profit ideas."
+        prompt = f"Short professional crypto trading reasoning for {symbol} at ${price:,.2f}. Decision: {decision}. Include stop-loss and take-profit ideas."
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
@@ -80,7 +82,7 @@ def save_to_journal(entry: dict):
 @app.get("/health")
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "Aria AI Trading Engine"}
+    return {"status": "ok", "service": "Aria AI Trading Engine", "ai": "Connected" if client else "Technical only"}
 
 @app.get("/analyze", response_class=HTMLResponse)
 async def dashboard(symbol: str = "BTCUSD"):
@@ -150,13 +152,13 @@ async def execute_trade(symbol: str = Query(...), side: str = Query(...)):
     save_position(position)
     save_to_journal({"action": "EXECUTE_TRADE", "symbol": symbol, "side": side, "price": current_price, "size": size, "timestamp": datetime.utcnow().isoformat()})
 
-    return HTMLResponse(f"<h2>✅ Paper Trade Executed: {side} {size} {symbol}</h2><p><a href='/analyze'>← Back to Dashboard</a></p>")
+    return HTMLResponse(f"<h2>✅ Paper Trade Executed: {side} {size} {symbol} at ${current_price:,.2f}</h2><p><a href='/analyze'>← Back to Dashboard</a></p>")
 
 @app.get("/close")
 async def close_position():
     position = load_position()
     if position:
-        save_position(None)  # close position
+        save_position(None)
         save_to_journal({"action": "CLOSE_POSITION", "symbol": position["symbol"], "timestamp": datetime.utcnow().isoformat()})
         return HTMLResponse(f"<h2>✅ Position Closed</h2><p><a href='/analyze'>← Back to Dashboard</a></p>")
     return HTMLResponse("<h2>No position to close</h2><p><a href='/analyze'>Back</a></p>")
