@@ -48,7 +48,7 @@ def fetch_market_data(symbol: str):
         r.raise_for_status()
         return float(r.json()["price"])
     except:
-        return 60500 if "BTC" in symbol else 3450
+        return 60500 if "BTC" in symbol else 3450   # fallback
 
 def save_to_journal(entry: dict):
     try:
@@ -72,7 +72,6 @@ async def dashboard(symbol: str = "BTCUSD"):
 
     current_price = fetch_market_data(symbol)
 
-    # Unrealized P/L
     pl = 0
     pl_percent = 0
     if position and position["symbol"] == symbol:
@@ -101,7 +100,7 @@ async def dashboard(symbol: str = "BTCUSD"):
             <p><strong>Suggested Size:</strong> {position_size} {symbol[:3]}</p>
             <p><strong>Paper Balance:</strong> ${balance:,.2f}</p>
         </div>
-        {f'<div class="card"><h3>🟢 Open Position</h3><p>Side: {position["side"]}</p><p>Entry: ${position["entry_price"]}</p><p>Unrealized P/L: ${pl:.2f} ({pl_percent:.1f}%)</p></div>' if position else '<div class="card"><p>No open position</p></div>'}
+        {f'<div class="card"><h3>🟢 Open Position</h3><p>Side: {position["side"]}</p><p>Entry: ${position["entry_price"]}</p><p>P/L: ${pl:.2f} ({pl_percent:.1f}%)</p></div>' if position else '<div class="card"><p>No open position</p></div>'}
         <p>
             <a href="/execute?symbol={symbol}&side=BUY">🟢 Execute BUY</a> | 
             <a href="/execute?symbol={symbol}&side=SELL">🔴 Execute SELL</a><br>
@@ -128,8 +127,7 @@ async def execute_trade(symbol: str = Query(...), side: str = Query(...)):
         "timestamp": datetime.utcnow().isoformat()
     }
     save_position(position)
-
-    save_to_journal({"action": "EXECUTE_TRADE", "symbol": symbol, "side": side, "price": current_price, "size": size, "timestamp": datetime.utcnow().isoformat()})
+    save_to_journal({"action": "EXECUTE", "symbol": symbol, "side": side, "price": current_price, "size": size, "timestamp": datetime.utcnow().isoformat()})
 
     return HTMLResponse(f"<h2>✅ Paper Trade Executed: {side} {size} {symbol} at ${current_price:,.2f}</h2><p><a href='/analyze'>← Back to Dashboard</a></p>")
 
