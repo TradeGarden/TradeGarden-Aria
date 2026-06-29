@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 import requests
 import random
@@ -8,6 +9,15 @@ import os
 from openai import OpenAI
 
 app = FastAPI(title="TradeGarden - Aria AI Trading Engine")
+
+# CORS added here
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows localhost:3000 and your React app
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 AI_API_KEY = os.getenv("AI_API_KEY")
 client = OpenAI(api_key=AI_API_KEY) if AI_API_KEY and AI_API_KEY.startswith("sk-") else None
