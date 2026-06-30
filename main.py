@@ -10,10 +10,10 @@ from openai import OpenAI
 
 app = FastAPI(title="TradeGarden - Aria AI Trading Engine")
 
-# CORS added here
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows localhost:3000 and your React app
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -94,6 +94,7 @@ def health():
 
 @app.get("/analyze", response_class=HTMLResponse)
 async def dashboard(symbol: str = "BTCUSD"):
+    # HTML version for browser
     balance = load_balance()
     position = load_position()
     symbol = symbol.upper()
@@ -141,6 +142,42 @@ async def dashboard(symbol: str = "BTCUSD"):
     </body></html>
     """
     return HTMLResponse(html)
+
+@app.get("/api/analyze")
+async def api_analyze(symbol: str = "BTCUSD", account_balance: float = 500):
+    # JSON version for React
+    balance = load_balance()
+    position = load_position()
+    symbol = symbol.upper()
+    if symbol not in ["BTCUSD", "ETHUSD"]:
+        symbol = "BTCUSD"
+
+    current_price = fetch_market_data(symbol)
+
+    pl = 0
+    pl_percent = 0
+    if position and position["symbol"] == symbol:
+        entry_price = position["entry_price"]
+        size = position["size"]
+        pl = (current_price - entry_price) * size if position["side"] == "BUY" else (entry_price - current_price) * size
+        pl_percent = (pl / position["risk_amount"]) * 100 if position["risk_amount"] > 0 else 0
+
+    decision = "BUY (Long)" if random.random() > 0.5 else "SELL (Short)"
+    ai_reason = get_ai_reasoning(symbol, current_price, decision)
+
+    risk_amount = balance * (MAX_RISK_PERCENT / 100)
+    position_size = round(risk_amount / (current_price * 0.02), 6)
+
+    return {
+        "symbol": symbol,
+        "price": current_price,
+        "decision": decision,
+        "ai_reasoning": ai_reason,
+        "risk_amount_usd": risk_amount,
+        "position_size": position_size,
+        "account_balance": balance,
+        "open_position": position
+    }
 
 @app.get("/execute")
 async def execute_trade(symbol: str = Query(...), side: str = Query(...)):
