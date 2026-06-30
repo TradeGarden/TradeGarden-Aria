@@ -69,20 +69,20 @@ def get_ai_reasoning(symbol, price, decision):
     if not client:
         return f"Technical: {decision} setup on {symbol} at ${price:,.2f}."
     try:
-        prompt = f"""You are a professional crypto trader. Analyze this setup:
+        prompt = f"""You are a sharp crypto trader. Analyze this setup:
 Symbol: {symbol}
 Price: ${price:,.2f}
 Decision: {decision}
 
 Give short, professional reasoning including:
-- Current market trend
-- Key technical reasons (EMA crossover, RSI, support/resistance)
+- Market trend (bullish/bearish/neutral)
+- Key technical reasons (EMA, RSI, support/resistance)
 - Suggested Stop Loss
 - Suggested Take Profit
 - Confidence score (0-100%)
 - Why this decision was made
 
-Keep it concise and actionable."""
+Be concise and actionable."""
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
