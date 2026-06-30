@@ -69,11 +69,24 @@ def get_ai_reasoning(symbol, price, decision):
     if not client:
         return f"Technical: {decision} setup on {symbol} at ${price:,.2f}."
     try:
-        prompt = f"Short professional trading reasoning for {symbol} at ${price:,.2f}. Decision: {decision}."
+        prompt = f"""You are a professional crypto trader. Analyze this setup:
+Symbol: {symbol}
+Price: ${price:,.2f}
+Decision: {decision}
+
+Give short, professional reasoning including:
+- Current market trend
+- Key technical reasons (EMA crossover, RSI, support/resistance)
+- Suggested Stop Loss
+- Suggested Take Profit
+- Confidence score (0-100%)
+- Why this decision was made
+
+Keep it concise and actionable."""
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=100,
+            max_tokens=180,
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
@@ -94,7 +107,6 @@ def health():
 
 @app.get("/analyze", response_class=HTMLResponse)
 async def dashboard(symbol: str = "BTCUSD"):
-    # HTML version for browser
     balance = load_balance()
     position = load_position()
     symbol = symbol.upper()
@@ -145,7 +157,6 @@ async def dashboard(symbol: str = "BTCUSD"):
 
 @app.get("/api/analyze")
 async def api_analyze(symbol: str = "BTCUSD", account_balance: float = 500):
-    # JSON version for React
     balance = load_balance()
     position = load_position()
     symbol = symbol.upper()
