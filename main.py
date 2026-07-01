@@ -74,19 +74,26 @@ Symbol: {symbol}
 Price: ${price:,.2f}
 Decision: {decision}
 
-Give short, professional reasoning including:
-- Market trend (bullish/bearish/neutral)
-- Key technical reasons (EMA crossover, RSI, support/resistance)
-- Suggested Stop Loss level
-- Suggested Take Profit level
-- Confidence score (0-100%)
-- Why this decision was made
+Give structured professional reasoning in this format:
+
+Market Structure: HH/HL/LH/LL
+Trend: Bullish/Bearish/Neutral
+EMA: EMA20 vs EMA50
+RSI: Level and condition
+MACD: Signal
+Volume: High/Low
+Candlestick: Pattern
+Support/Resistance: Holding or broken
+Suggested Stop Loss:
+Suggested Take Profit:
+Confidence: XX%
+Why this decision:
 
 Be concise and actionable."""
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=180,
+            max_tokens=220,
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
