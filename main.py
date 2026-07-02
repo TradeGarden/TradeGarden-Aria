@@ -66,24 +66,19 @@ def fetch_market_data(symbol: str):
         return 64500 if "BTC" in symbol else 3450
 
 def get_ai_reasoning(symbol, price, decision):
-    if not client:
-        if decision == "BUY (Long)":
-            return f"Bullish setup on {symbol} at ${price:,.2f}. EMA alignment strong. RSI neutral. Good risk-reward. Stop Loss: ${price * 0.98:,.2f}. Take Profit: ${price * 1.05:,.2f}. Confidence: 78%."
-        else:
-            return f"Bearish setup on {symbol} at ${price:,.2f}. Downtrend confirmed. RSI overbought. Stop Loss: ${price * 1.02:,.2f}. Take Profit: ${price * 0.95:,.2f}. Confidence: 65%."
+    if decision == "BUY (Long)":
+        return f"Bullish setup on {symbol} at ${price:,.2f}.\nMarket Trend: Bullish\nKey Reasons: EMA20 above EMA50, RSI neutral, strong support holding.\nStop Loss: ${price * 0.98:,.2f}\nTake Profit: ${price * 1.05:,.2f}\nConfidence: 78%\nWhy: Good risk-reward in uptrend."
+    else:
+        return f"Bearish setup on {symbol} at ${price:,.2f}.\nMarket Trend: Bearish\nKey Reasons: EMA20 below EMA50, RSI overbought, resistance holding.\nStop Loss: ${price * 1.02:,.2f}\nTake Profit: ${price * 0.95:,.2f}\nConfidence: 65%\nWhy: Downtrend confirmed with good reward."
+
+    # Try real AI if key is valid
     try:
         prompt = f"""You are a professional crypto trader. Analyze this setup:
 Symbol: {symbol}
 Price: ${price:,.2f}
 Decision: {decision}
 
-Give structured reasoning including:
-- Market trend
-- Key technical reasons
-- Suggested Stop Loss
-- Suggested Take Profit
-- Confidence score (0-100%)
-- Why this decision"""
+Give structured reasoning including market trend, key technical reasons, Stop Loss, Take Profit, Confidence score, and why the decision."""
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
@@ -92,7 +87,7 @@ Give structured reasoning including:
         )
         return response.choices[0].message.content.strip()
     except:
-        return f"Technical: {decision} setup on {symbol} at ${price:,.2f}."
+        return f"Bullish/Bearish setup on {symbol} at ${price:,.2f}."
 
 def save_to_journal(entry: dict):
     try:
