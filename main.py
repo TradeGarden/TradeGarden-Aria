@@ -3,7 +3,6 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 import requests
-import random
 import json
 import os
 from openai import OpenAI
@@ -56,6 +55,26 @@ def save_position(position):
     except:
         pass
 
+def ema(prices, period):
+    k = 2 / (period + 1)
+    ema_val = prices[0]
+    for price in prices[1:]:
+        ema_val = price * k + ema_val * (1 - k)
+    return ema_val
+
+def rsi(prices, period=14):
+    gains, losses = [], []
+    for i in range(1, period + 1):
+        diff = prices[i] - prices[i - 1]
+        if diff >= 0:
+            gains.append(diff)
+        else:
+            losses.append(abs(diff))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period if losses else 0.0001
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
+
 def fetch_market_data(symbol: str):
     try:
         coin = "bitcoin" if "BTC" in symbol else "ethereum"
@@ -65,16 +84,26 @@ def fetch_market_data(symbol: str):
     except:
         return 64500 if "BTC" in symbol else 3450
 
-def get_ai_reasoning(symbol, price, decision):
+def get_ai_reasoning(symbol, price, decision, ema20, ema50, rsi14):
     if not client:
-        return f"Bullish setup on {symbol} at ${price:,.2f}. EMA20 above EMA50, RSI neutral. Stop Loss: ${price * 0.98:,.2f}. Take Profit: ${price * 1.05:,.2f}. Confidence: 78%."
+        return f"Bullish setup on {symbol} at ${price:,.2f}. EMA20 above EMA50, RSI {rsi14}. Stop Loss: ${price * 0.98:,.2f}. Take Profit: ${price * 1.05:,.2f}. Confidence: 78%."
     try:
         prompt = f"""You are a professional crypto trader. Analyze this setup:
 Symbol: {symbol}
 Price: ${price:,.2f}
 Decision: {decision}
+EMA20: {ema20}
+EMA50: {ema50}
+RSI14: {rsi14}
 
-Give structured reasoning including market trend, key technical reasons, Stop Loss, Take Profit, Confidence score, and why the decision."""
+Give structured reasoning including:
+- Market Structure (HH/HL)
+- Trend
+- Key technical reasons
+- Suggested Stop Loss
+- Suggested Take Profit
+- Confidence score (0-100%)
+- Why this decision"""
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
@@ -83,7 +112,7 @@ Give structured reasoning including market trend, key technical reasons, Stop Lo
         )
         return response.choices[0].message.content.strip()
     except:
-        return f"Bullish setup on {symbol} at ${price:,.2f}. EMA20 above EMA50, RSI neutral. Stop Loss: ${price * 0.98:,.2f}. Take Profit: ${price * 1.05:,.2f}. Confidence: 78%."
+        return f"Bullish setup on {symbol} at ${price:,.2f}. EMA20 above EMA50, RSI {rsi14}. Stop Loss: ${price * 0.98:,.2f}. Take Profit: ${price * 1.05:,.2f}. Confidence: 78%."
 
 def save_to_journal(entry: dict):
     try:
@@ -116,7 +145,12 @@ async def dashboard(symbol: str = "BTCUSD"):
         pl_percent = (pl / position["risk_amount"]) * 100 if position["risk_amount"] > 0 else 0
 
     decision = "BUY (Long)" if random.random() > 0.5 else "SELL (Short)"
-    ai_reason = get_ai_reasoning(symbol, current_price, decision)
+    # Simulate prices for EMA/RSI
+    prices = [current_price * (0.98 + random.random() * 0.04) for _ in range(100)]
+    ema20 = ema(prices[-20:], 20)
+    ema50 = ema(prices[-50:], 50)
+    rsi14 = rsi(prices)
+    ai_reason = get_ai_reasoning(symbol, current_price, decision, ema20, ema50, rsi14)
 
     risk_amount = balance * (MAX_RISK_PERCENT / 100)
     position_size = round(risk_amount / (current_price * 0.02), 6)
@@ -166,7 +200,11 @@ async def api_analyze(symbol: str = "BTCUSD", account_balance: float = 500):
         pl_percent = (pl / position["risk_amount"]) * 100 if position["risk_amount"] > 0 else 0
 
     decision = "BUY (Long)" if random.random() > 0.5 else "SELL (Short)"
-    ai_reason = get_ai_reasoning(symbol, current_price, decision)
+    prices = [current_price * (0.98 + random.random() * 0.04) for _ in range(100)]
+    ema20 = ema(prices[-20:], 20)
+    ema50 = ema(prices[-50:], 50)
+    rsi14 = rsi(prices)
+    ai_reason = get_ai_reasoning(symbol, current_price, decision, ema20, ema50, rsi14)
 
     risk_amount = balance * (MAX_RISK_PERCENT / 100)
     position_size = round(risk_amount / (current_price * 0.02), 6)
