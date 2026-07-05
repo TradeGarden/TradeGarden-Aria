@@ -188,33 +188,50 @@ def volume_analysis(candles: list) -> dict:
     }
 
 def detect_market_structure(candles: list) -> dict:
-    recent = candles[-20:]
-    highs  = [c["high"] for c in recent]
-    lows   = [c["low"]  for c in recent]
-    mid    = len(recent)//2
-    fh, sh = max(highs[:mid]), max(highs[mid:])
-    fl, sl = min(lows[:mid]),  min(lows[mid:])
+    """
+    Splits last 40 candles into 5 windows to extract swing points,
+    classifies each pair as HH/LH/HL/LL and builds a visual sequence.
+    """
+    recent = candles[-40:] if len(candles) >= 40 else candles
+    n = len(recent)
+    wins = 5
+    size = max(n // wins, 1)
+    swing_highs, swing_lows = [], []
+    for i in range(wins):
+        chunk = recent[i*size:(i+1)*size] if i < wins-1 else recent[i*size:]
+        if not chunk: continue
+        swing_highs.append(max(c["high"] for c in chunk))
+        swing_lows.append(min(c["low"] for c in chunk))
 
-    hh = sh > fh; hl = sl > fl
-    lh = sh < fh; ll = sl < fl
+    seq = []
+    for i in range(1, len(swing_highs)):
+        ph, pl = swing_highs[i-1], swing_lows[i-1]
+        ch, cl = swing_highs[i],   swing_lows[i]
+        if ch > ph:   seq.append("HH")
+        elif ch < ph: seq.append("LH")
+        if cl > pl:   seq.append("HL")
+        elif cl < pl: seq.append("LL")
 
-    if hh and hl:   structure, trend = "HH / HL", "Bullish"
-    elif lh and ll: structure, trend = "LH / LL", "Bearish"
-    elif hh and ll: structure, trend = "HH / LL", "Neutral"
-    else:           structure, trend = "LH / HL", "Neutral"
+    sequence = " → ".join(seq) if seq else "Forming"
 
-    # Trend strength: how decisive is the move?
-    high_delta = abs(sh-fh)/(fh+1e-9)*100
-    low_delta  = abs(sl-fl)/(fl+1e-9)*100
+    fh, sh = swing_highs[0], swing_highs[-1]
+    fl, sl = swing_lows[0],  swing_lows[-1]
+
+    if sh > fh and sl > fl:   structure, trend = "HH / HL", "Bullish"
+    elif sh < fh and sl < fl: structure, trend = "LH / LL", "Bearish"
+    elif sh > fh and sl < fl: structure, trend = "HH / LL", "Neutral"
+    else:                     structure, trend = "LH / HL", "Neutral"
+
+    high_delta   = abs(sh-fh)/(fh+1e-9)*100
+    low_delta    = abs(sl-fl)/(fl+1e-9)*100
     strength_pct = min(int((high_delta+low_delta)*5), 100)
 
-    if strength_pct >= 70:   strength_label = "Strong"
-    elif strength_pct >= 40: strength_label = "Moderate"
-    else:                    strength_label = "Weak"
+    strength_label = "Strong" if strength_pct >= 70 else ("Moderate" if strength_pct >= 40 else "Weak")
 
     return {
         "structure":      structure,
         "trend":          trend,
+        "sequence":       sequence,
         "swing_high":     round(sh, 2),
         "swing_low":      round(sl, 2),
         "strength_pct":   strength_pct,
@@ -286,10 +303,26 @@ def detect_candlestick_patterns(candles: list) -> list:
         patterns.append({"name": "Gravestone Doji", "direction": "Bearish", "strength": "Moderate"})
 
     # ── Neutral ──────────────────────────────
-    # Doji: tiny body
     if b2 < r2*0.05:
         if not any(p["name"] in ("Dragonfly Doji", "Gravestone Doji") for p in patterns):
             patterns.append({"name": "Doji", "direction": "Neutral", "strength": "Weak"})
+
+    # Add reliability rating to every detected pattern
+    RELIABILITY = {
+        "Hammer":            "Moderate",
+        "Bullish Engulfing": "High",
+        "Morning Star":      "High",
+        "Bullish Marubozu":  "High",
+        "Dragonfly Doji":    "Moderate",
+        "Shooting Star":     "Moderate",
+        "Bearish Engulfing": "High",
+        "Evening Star":      "High",
+        "Bearish Marubozu":  "High",
+        "Gravestone Doji":   "Moderate",
+        "Doji":              "Low",
+    }
+    for p in patterns:
+        p["reliability"] = RELIABILITY.get(p["name"], "Moderate")
 
     return patterns
 
@@ -388,6 +421,132 @@ def compute_confidence(ms: dict, closes: list, candles: list,
     total = sum(scores.values())
     return {"breakdown": scores, "total": total}
 
+
+# ─────────────────────────────────────────────
+# SUPPORT / RESISTANCE WITH TOUCH COUNT
+# ─────────────────────────────────────────────
+
+def analyze_levels(candles: list, current_price: float) -> dict:
+    """
+    Find key support and resistance levels and count how many times
+    price has tested (touched) each level within a tolerance band.
+    """
+    tolerance = current_price * 0.005  # 0.5% band
+
+    recent = candles[-50:]
+    lows   = [c["low"]  for c in recent]
+    highs  = [c["high"] for c in recent]
+
+    support_level    = round(min(lows), 2)
+    resistance_level = round(max(highs), 2)
+
+    # Count touches: how many candles came within tolerance of the level
+    support_touches = sum(
+        1 for c in recent if abs(c["low"] - support_level) <= tolerance
+    )
+    resistance_touches = sum(
+        1 for c in recent if abs(c["high"] - resistance_level) <= tolerance
+    )
+
+    def strength_label(touches: int) -> str:
+        if touches >= 4: return "High"
+        if touches >= 2: return "Moderate"
+        return "Low"
+
+    return {
+        "support":            support_level,
+        "support_touches":    support_touches,
+        "support_strength":   strength_label(support_touches),
+        "resistance":         resistance_level,
+        "resistance_touches": resistance_touches,
+        "resistance_strength":strength_label(resistance_touches),
+    }
+
+# ─────────────────────────────────────────────
+# FAIR VALUE GAP (FVG)
+# ─────────────────────────────────────────────
+
+def detect_fvg(candles: list) -> list:
+    """
+    A Fair Value Gap occurs when candle[i-1].high < candle[i+1].low (bullish FVG)
+    or candle[i-1].low > candle[i+1].high (bearish FVG).
+    Looks at the last 30 candles and returns up to 3 most recent gaps.
+    """
+    fvgs = []
+    window = candles[-30:] if len(candles) >= 30 else candles
+    for i in range(1, len(window)-1):
+        c_prev = window[i-1]
+        c_mid  = window[i]
+        c_next = window[i+1]
+        # Bullish FVG: gap up — prev high below next low
+        if c_prev["high"] < c_next["low"]:
+            fvgs.append({
+                "type":       "Bullish",
+                "low":        round(c_prev["high"], 2),
+                "high":       round(c_next["low"], 2),
+                "midpoint":   round((c_prev["high"] + c_next["low"]) / 2, 2),
+            })
+        # Bearish FVG: gap down — prev low above next high
+        elif c_prev["low"] > c_next["high"]:
+            fvgs.append({
+                "type":       "Bearish",
+                "low":        round(c_next["high"], 2),
+                "high":       round(c_prev["low"], 2),
+                "midpoint":   round((c_prev["low"] + c_next["high"]) / 2, 2),
+            })
+    return fvgs[-3:]  # Return last 3 FVGs
+
+# ─────────────────────────────────────────────
+# LIQUIDITY ANALYSIS
+# ─────────────────────────────────────────────
+
+def detect_liquidity(candles: list, current_price: float) -> dict:
+    """
+    Identifies:
+    - Buy-side liquidity (BSL): resting above equal/recent highs
+    - Sell-side liquidity (SSL): resting below equal/recent lows
+    - Liquidity sweep: price breaking a prior high/low then reversing
+    - Equal highs / equal lows (within 0.2% tolerance)
+    """
+    tolerance = current_price * 0.002
+    recent    = candles[-20:]
+    highs     = [c["high"]  for c in recent]
+    lows      = [c["low"]   for c in recent]
+
+    recent_high = max(highs)
+    recent_low  = min(lows)
+
+    # Equal highs: multiple candles with highs within tolerance of the max
+    eq_highs = [round(h, 2) for h in highs if abs(h - recent_high) <= tolerance]
+    eq_lows  = [round(l, 2) for l in lows  if abs(l - recent_low)  <= tolerance]
+
+    equal_highs_detected = len(eq_highs) >= 2
+    equal_lows_detected  = len(eq_lows)  >= 2
+
+    # Sweep detection: last candle wick pierced prior high or low then closed back
+    last = candles[-1]
+    prev_high = max(c["high"] for c in candles[-6:-1]) if len(candles) >= 6 else recent_high
+    prev_low  = min(c["low"]  for c in candles[-6:-1]) if len(candles) >= 6 else recent_low
+
+    swept_high = last["high"] > prev_high and last["close"] < prev_high
+    swept_low  = last["low"]  < prev_low  and last["close"] > prev_low
+
+    sweep_note = None
+    if swept_high:
+        sweep_note = {"direction": "Above previous high", "signal": "Potential bearish reversal"}
+    elif swept_low:
+        sweep_note = {"direction": "Below previous low", "signal": "Potential bullish reversal"}
+
+    return {
+        "buy_side_level":       round(recent_high, 2),
+        "sell_side_level":      round(recent_low,  2),
+        "equal_highs":          equal_highs_detected,
+        "equal_highs_level":    round(recent_high, 2) if equal_highs_detected else None,
+        "equal_lows":           equal_lows_detected,
+        "equal_lows_level":     round(recent_low, 2)  if equal_lows_detected  else None,
+        "sweep":                sweep_note,
+    }
+
 # ─────────────────────────────────────────────
 # MAIN COMPUTE
 # ─────────────────────────────────────────────
@@ -404,8 +563,11 @@ def compute_all(candles: list, current_price: float) -> dict:
     vol = volume_analysis(candles)
     patterns = detect_candlestick_patterns(candles)
 
-    support    = round(min(c["low"]  for c in candles[-20:]), 2)
-    resistance = round(max(c["high"] for c in candles[-20:]), 2)
+    levels     = analyze_levels(candles, current_price)
+    support    = levels["support"]
+    resistance = levels["resistance"]
+    fvgs       = detect_fvg(candles)
+    liquidity  = detect_liquidity(candles, current_price)
 
     bull = e20 > e50 and r < 70 and ms["trend"] == "Bullish"
     bear = e20 < e50 and r > 30 and ms["trend"] == "Bearish"
@@ -447,6 +609,10 @@ def compute_all(candles: list, current_price: float) -> dict:
         "volume":      vol,
         "patterns":    patterns,
         "confidence":  conf,
+        "sequence":    ms["sequence"],
+        "fvgs":        fvgs,
+        "liquidity":   liquidity,
+        "levels":      levels,
     }
 
 # ─────────────────────────────────────────────
@@ -546,12 +712,112 @@ def conf_bar_html(total: int, breakdown: dict) -> str:
 </div>"""
 
 def pattern_badges(patterns: list) -> str:
-    if not patterns: return "<span style='color:#555;font-size:13px'>No pattern detected</span>"
+    if not patterns:
+        return "<span style='color:#555;font-size:13px'>No pattern detected on this candle</span>"
     out = ""
     for p in patterns:
-        c = "#2ecc71" if p["direction"]=="Bullish" else ("#e74c3c" if p["direction"]=="Bearish" else "#888")
-        out += f"<span style='display:inline-block;margin:3px;padding:4px 10px;border-radius:16px;border:1px solid {c};color:{c};font-size:12px'>{p['name']} · {p['strength']}</span>"
+        c   = "#2ecc71" if p["direction"]=="Bullish" else ("#e74c3c" if p["direction"]=="Bearish" else "#888")
+        rel = p.get("reliability", "Moderate")
+        rel_color = "#2ecc71" if rel=="High" else ("#f39c12" if rel=="Moderate" else "#888")
+        out += (
+            f"<div style='display:inline-block;margin:4px;padding:8px 14px;border-radius:10px;"
+            f"border:1px solid {c};background:{c}11;vertical-align:top'>"
+            f"<div style='color:{c};font-weight:bold;font-size:13px'>{p['name']}</div>"
+            f"<div style='color:#888;font-size:11px;margin-top:2px'>{p['direction']} · {p['strength']}</div>"
+            f"<div style='color:{rel_color};font-size:11px'>Reliability: <b>{rel}</b></div>"
+            f"</div>"
+        )
     return out
+
+def fvg_html(fvgs: list) -> str:
+    if not fvgs:
+        return "<div class='card'><h3>⚡ Fair Value Gap (FVG)</h3><p style='color:#555;font-size:13px'>No FVG detected in recent candles</p></div>"
+    rows = ""
+    for g in reversed(fvgs):
+        c = "#2ecc71" if g["type"]=="Bullish" else "#e74c3c"
+        rows += (
+            f"<div style='background:#111;border-radius:8px;padding:12px;margin:6px 0;"
+            f"border-left:3px solid {c}'>"
+            f"<span style='color:{c};font-weight:bold'>{g['type']} FVG</span>"
+            f"<span style='color:#555;font-size:12px;float:right'>${g['low']:,.2f} – ${g['high']:,.2f}</span><br>"
+            f"<span style='color:#888;font-size:12px'>Midpoint: ${g['midpoint']:,.2f} · "
+            f"{'Acts as support' if g['type']=='Bullish' else 'Acts as resistance'}</span>"
+            f"</div>"
+        )
+    return f"<div class='card'><h3>⚡ Fair Value Gap (FVG)</h3>{rows}</div>"
+
+def liquidity_html(liq: dict) -> str:
+    rows = ""
+    # Buy-side liquidity
+    rows += (
+        f"<div style='background:#111;border-radius:8px;padding:12px;margin:6px 0;border-left:3px solid #2ecc71'>"
+        f"<span style='color:#2ecc71;font-weight:bold'>Buy-Side Liquidity (BSL)</span>"
+        f"<span style='color:#555;font-size:12px;float:right'>${liq['buy_side_level']:,.2f}</span><br>"
+        f"<span style='color:#888;font-size:12px'>Resting above — short stops / breakout orders cluster here</span>"
+        f"</div>"
+    )
+    # Sell-side liquidity
+    rows += (
+        f"<div style='background:#111;border-radius:8px;padding:12px;margin:6px 0;border-left:3px solid #e74c3c'>"
+        f"<span style='color:#e74c3c;font-weight:bold'>Sell-Side Liquidity (SSL)</span>"
+        f"<span style='color:#555;font-size:12px;float:right'>${liq['sell_side_level']:,.2f}</span><br>"
+        f"<span style='color:#888;font-size:12px'>Resting below — long stops / sell orders cluster here</span>"
+        f"</div>"
+    )
+    # Equal highs
+    if liq["equal_highs"]:
+        rows += (
+            f"<div style='background:#111;border-radius:8px;padding:12px;margin:6px 0;border-left:3px solid #f39c12'>"
+            f"<span style='color:#f39c12;font-weight:bold'>Equal Highs Detected</span>"
+            f"<span style='color:#555;font-size:12px;float:right'>${liq['equal_highs_level']:,.2f}</span><br>"
+            f"<span style='color:#888;font-size:12px'>Buy-side liquidity resting above — sweep risk</span>"
+            f"</div>"
+        )
+    # Equal lows
+    if liq["equal_lows"]:
+        rows += (
+            f"<div style='background:#111;border-radius:8px;padding:12px;margin:6px 0;border-left:3px solid #f39c12'>"
+            f"<span style='color:#f39c12;font-weight:bold'>Equal Lows Detected</span>"
+            f"<span style='color:#555;font-size:12px;float:right'>${liq['equal_lows_level']:,.2f}</span><br>"
+            f"<span style='color:#888;font-size:12px'>Sell-side liquidity resting below — sweep risk</span>"
+            f"</div>"
+        )
+    # Sweep
+    if liq["sweep"]:
+        sw = liq["sweep"]
+        rows += (
+            f"<div style='background:#1a1000;border-radius:8px;padding:12px;margin:6px 0;border:1px solid #f39c12'>"
+            f"<span style='color:#f39c12;font-weight:bold'>⚠️ Liquidity Sweep Detected</span><br>"
+            f"<span style='color:#ccc;font-size:13px'>{sw['direction']}</span><br>"
+            f"<span style='color:#f39c12;font-size:12px'>{sw['signal']}</span>"
+            f"</div>"
+        )
+    return f"<div class='card'><h3>💧 Liquidity Analysis</h3>{rows}</div>"
+
+def levels_html(levels: dict) -> str:
+    def bar(strength):
+        w = {"High": 100, "Moderate": 60, "Low": 30}.get(strength, 40)
+        c = {"High": "#2ecc71", "Moderate": "#f39c12", "Low": "#e74c3c"}.get(strength, "#888")
+        return (f"<div style='background:#1a1a1a;border-radius:4px;height:6px;margin-top:4px'>"
+                f"<div style='width:{w}%;height:100%;background:{c};border-radius:4px'></div></div>")
+
+    rows = ""
+    for label, level, touches, strength in [
+        ("Support", levels["support"], levels["support_touches"], levels["support_strength"]),
+        ("Resistance", levels["resistance"], levels["resistance_touches"], levels["resistance_strength"]),
+    ]:
+        c = "#2ecc71" if label=="Support" else "#e74c3c"
+        rows += (
+            f"<div style='background:#111;border-radius:8px;padding:12px;margin:6px 0'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+            f"<span style='color:{c};font-weight:bold'>{label}</span>"
+            f"<span style='color:#fff;font-weight:bold'>${level:,.2f}</span>"
+            f"</div>"
+            f"<div style='color:#666;font-size:12px;margin-top:4px'>Tested {touches}x · Strength: <b style='color:#ccc'>{strength}</b></div>"
+            f"{bar(strength)}"
+            f"</div>"
+        )
+    return f"<div class='card'><h3>📌 Key Levels</h3>{rows}</div>"
 
 def mtf_html(frames: list, summary: dict) -> str:
     rows = ""
@@ -667,8 +933,13 @@ async def dashboard(symbol: str = "BTCUSD"):
     &nbsp;
     Structure: <span class="struct">{ind['structure']}</span>
     &nbsp;
-    <span style="color:{trend_color};font-size:13px">Trend Strength: <b>{ind['strength_label']} ({ind['strength_pct']}%)</b></span>
+    <span style="color:{trend_color};font-size:13px">Trend: <b>{ind['strength_label']} ({ind['strength_pct']}%)</b></span>
   </p>
+  <div style="background:#111;border-radius:8px;padding:10px 14px;margin:8px 0;font-size:13px">
+    <span style="color:#555;font-size:11px;text-transform:uppercase;letter-spacing:1px">Swing Sequence</span><br>
+    <span style="color:{trend_color};font-weight:bold;letter-spacing:2px;font-size:14px">{ind['sequence']}</span>
+  </div>
+
 
   {conf_bar_html(conf['total'], conf['breakdown'])}
 
@@ -711,6 +982,12 @@ async def dashboard(symbol: str = "BTCUSD"):
 </div>
 
 {mtf_html(frames, summ)}
+
+{levels_html(ind['levels'])}
+
+{fvg_html(ind['fvgs'])}
+
+{liquidity_html(ind['liquidity'])}
 
 {pl_block}
 
