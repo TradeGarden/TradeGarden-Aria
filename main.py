@@ -430,11 +430,12 @@ async def close_position():
     })
 
     color = "#2ecc71" if pl >= 0 else "#e74c3c"
+    closed_symbol = position["symbol"]
     return HTMLResponse(
         f"<h2>✅ Position Closed</h2>"
         f"<p>P/L: <b style='color:{color}'>${pl:,.2f}</b></p>"
         f"<p>New Balance: <b>${new_balance:,.2f}</b></p>"
-        f"<p><a href='/analyze?symbol={position[\"symbol\"]}'>← Back to Dashboard</a></p>"
+        f"<p><a href='/analyze?symbol={closed_symbol}'>← Back to Dashboard</a></p>"
     )
 
 
