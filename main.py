@@ -7,7 +7,7 @@ import json
 import os
 from openai import OpenAI
 
-app = FastAPI(title="TradeGarden - Aria AI Trading Engine")
+app = FastAPI(title="Aria AI Trading Engine")
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,28 +21,30 @@ AI_API_KEY = os.getenv("AI_API_KEY")
 client = OpenAI(api_key=AI_API_KEY) if AI_API_KEY and AI_API_KEY.startswith("sk-") else None
 
 MAX_RISK_PERCENT = 1.0
-VALID_SYMBOLS = ["BTCUSD", "ETHUSD"]
+VALID_SYMBOLS    = ["BTCUSD", "ETHUSD"]
+KRAKEN_PAIRS     = {"BTCUSD": "XBTUSD", "ETHUSD": "ETHUSD"}
 
-# ─────────────────────────────────────────────
-# STATE
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  STATE
+# ══════════════════════════════════════════════
 
 def load_balance() -> float:
     try:
         if os.path.exists("paper_balance.txt"):
-            with open("paper_balance.txt", "r") as f:
+            with open("paper_balance.txt") as f:
                 return float(f.read().strip())
     except Exception:
         pass
     return 500.0
 
 def save_balance(b: float):
-    with open("paper_balance.txt", "w") as f: f.write(str(round(b, 2)))
+    with open("paper_balance.txt", "w") as f:
+        f.write(str(round(b, 2)))
 
 def load_position():
     try:
         if os.path.exists("paper_position.json"):
-            with open("paper_position.json", "r") as f:
+            with open("paper_position.json") as f:
                 d = json.load(f)
                 return d if d else None
     except Exception:
@@ -50,18 +52,16 @@ def load_position():
     return None
 
 def save_position(p):
-    with open("paper_position.json", "w") as f: json.dump(p, f)
+    with open("paper_position.json", "w") as f:
+        json.dump(p, f)
 
 def save_to_journal(e: dict):
     with open("trade_journal.txt", "a", encoding="utf-8") as f:
         f.write(json.dumps(e, ensure_ascii=False) + "\n")
 
-# ─────────────────────────────────────────────
-# MARKET DATA
-# ─────────────────────────────────────────────
-
-KRAKEN_PAIRS = {"BTCUSD": "XBTUSD", "ETHUSD": "ETHUSD"}
-KRAKEN_INTERVALS = {"15m": 15, "1H": 60, "4H": 240, "Daily": 1440}
+# ══════════════════════════════════════════════
+#  MARKET DATA
+# ══════════════════════════════════════════════
 
 def fetch_candles_kraken(symbol: str, interval_min: int = 1440, limit: int = 120) -> list:
     pair = KRAKEN_PAIRS.get(symbol, "XBTUSD")
@@ -121,61 +121,71 @@ def fetch_current_price(symbol: str) -> float:
         pass
     coin = "bitcoin" if "BTC" in symbol else "ethereum"
     try:
-        r = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd", timeout=10)
+        r = requests.get(
+            f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd",
+            timeout=10)
         return float(r.json()[coin]["usd"])
     except Exception:
         return 62000.0 if "BTC" in symbol else 3400.0
 
-# ─────────────────────────────────────────────
-# INDICATORS
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  INDICATORS
+# ══════════════════════════════════════════════
 
 def ema(closes: list, period: int) -> float:
-    if len(closes) < period: return round(sum(closes)/len(closes), 2)
+    if len(closes) < period:
+        return round(sum(closes) / len(closes), 2)
     subset = closes[-period:]
-    k = 2/(period+1); val = subset[0]
-    for p in subset[1:]: val = p*k + val*(1-k)
+    k = 2 / (period + 1)
+    val = subset[0]
+    for p in subset[1:]:
+        val = p * k + val * (1 - k)
     return round(val, 2)
 
 def rsi(closes: list, period: int = 14) -> float:
-    if len(closes) < period+1: return 50.0
-    rel = closes[-(period+1):]
+    if len(closes) < period + 1: return 50.0
+    rel = closes[-(period + 1):]
     gains, losses = [], []
     for i in range(1, len(rel)):
-        d = rel[i]-rel[i-1]
+        d = rel[i] - rel[i - 1]
         (gains if d >= 0 else losses).append(abs(d))
-    ag = sum(gains)/period if gains else 0.0
-    al = sum(losses)/period if losses else 1e-9
-    return round(100 - (100/(1+ag/al)), 2)
+    ag = sum(gains) / period if gains else 0.0
+    al = sum(losses) / period if losses else 1e-9
+    return round(100 - (100 / (1 + ag / al)), 2)
 
-def macd(closes: list):
+def rsi_label(r: float) -> str:
+    if r >= 70: return "Overbought"
+    if r <= 30: return "Oversold"
+    return "Neutral"
+
+def macd_calc(closes: list):
     if len(closes) < 26: return 0.0, 0.0, 0.0
-    ema12 = ema(closes, 12)
-    ema26 = ema(closes, 26)
-    line  = round(ema12 - ema26, 2)
-    # signal = 9-period EMA of macd line (approximated)
-    signal = round(line * (2/10) + line * (8/10), 2)
-    hist   = round(line - signal, 2)
-    return line, signal, hist
+    e12  = ema(closes, 12)
+    e26  = ema(closes, 26)
+    line = round(e12 - e26, 2)
+    sig  = round(line * 0.2 + line * 0.8, 2)
+    hist = round(line - sig, 2)
+    return line, sig, hist
 
-def atr(candles: list, period: int = 14) -> float:
-    if len(candles) < period+1: return 0.0
+def atr_calc(candles: list, period: int = 14) -> float:
+    if len(candles) < period + 1: return 0.0
     trs = []
     for i in range(1, len(candles)):
-        pc = candles[i-1]["close"]
-        tr = max(candles[i]["high"]-candles[i]["low"],
-                 abs(candles[i]["high"]-pc), abs(candles[i]["low"]-pc))
+        pc = candles[i - 1]["close"]
+        tr = max(candles[i]["high"] - candles[i]["low"],
+                 abs(candles[i]["high"] - pc),
+                 abs(candles[i]["low"] - pc))
         trs.append(tr)
-    return round(sum(trs[-period:])/period, 2)
+    return round(sum(trs[-period:]) / period, 2)
 
 def volume_analysis(candles: list) -> dict:
     if len(candles) < 20:
-        return {"current": 0, "avg20": 0, "buy_pressure": 50, "sell_pressure": 50, "relative": 1.0}
+        return {"current": 0, "avg20": 0, "buy_pressure": 50,
+                "sell_pressure": 50, "relative": 1.0}
     recent   = candles[-20:]
     current  = round(candles[-1]["volume"], 2)
-    avg20    = round(sum(c["volume"] for c in recent)/20, 2)
-    relative = round(current/avg20, 2) if avg20 > 0 else 1.0
-    # Buy/sell pressure: candles where close > open = buying
+    avg20    = round(sum(c["volume"] for c in recent) / 20, 2)
+    relative = round(current / avg20, 2) if avg20 > 0 else 1.0
     buy_vol  = sum(c["volume"] for c in recent if c["close"] >= c["open"])
     sell_vol = sum(c["volume"] for c in recent if c["close"] < c["open"])
     total    = buy_vol + sell_vol if (buy_vol + sell_vol) > 0 else 1
@@ -183,30 +193,25 @@ def volume_analysis(candles: list) -> dict:
         "current":       current,
         "avg20":         avg20,
         "relative":      relative,
-        "buy_pressure":  round(buy_vol/total*100, 1),
-        "sell_pressure": round(sell_vol/total*100, 1),
+        "buy_pressure":  round(buy_vol / total * 100, 1),
+        "sell_pressure": round(sell_vol / total * 100, 1),
     }
 
 def detect_market_structure(candles: list) -> dict:
-    """
-    Splits last 40 candles into 5 windows to extract swing points,
-    classifies each pair as HH/LH/HL/LL and builds a visual sequence.
-    """
     recent = candles[-40:] if len(candles) >= 40 else candles
-    n = len(recent)
-    wins = 5
-    size = max(n // wins, 1)
+    wins   = 5
+    size   = max(len(recent) // wins, 1)
     swing_highs, swing_lows = [], []
     for i in range(wins):
-        chunk = recent[i*size:(i+1)*size] if i < wins-1 else recent[i*size:]
+        chunk = recent[i * size:(i + 1) * size] if i < wins - 1 else recent[i * size:]
         if not chunk: continue
         swing_highs.append(max(c["high"] for c in chunk))
-        swing_lows.append(min(c["low"] for c in chunk))
+        swing_lows.append(min(c["low"]  for c in chunk))
 
     seq = []
     for i in range(1, len(swing_highs)):
-        ph, pl = swing_highs[i-1], swing_lows[i-1]
-        ch, cl = swing_highs[i],   swing_lows[i]
+        ph, pl = swing_highs[i - 1], swing_lows[i - 1]
+        ch, cl = swing_highs[i],     swing_lows[i]
         if ch > ph:   seq.append("HH")
         elif ch < ph: seq.append("LH")
         if cl > pl:   seq.append("HL")
@@ -222,11 +227,14 @@ def detect_market_structure(candles: list) -> dict:
     elif sh > fh and sl < fl: structure, trend = "HH / LL", "Neutral"
     else:                     structure, trend = "LH / HL", "Neutral"
 
-    high_delta   = abs(sh-fh)/(fh+1e-9)*100
-    low_delta    = abs(sl-fl)/(fl+1e-9)*100
-    strength_pct = min(int((high_delta+low_delta)*5), 100)
+    hd = abs(sh - fh) / (fh + 1e-9) * 100
+    ld = abs(sl - fl) / (fl + 1e-9) * 100
+    sp = min(int((hd + ld) * 5), 100)
+    sl_label = "Strong" if sp >= 70 else ("Moderate" if sp >= 40 else "Weak")
 
-    strength_label = "Strong" if strength_pct >= 70 else ("Moderate" if strength_pct >= 40 else "Weak")
+    # BOS / CHoCH
+    bos   = sh > fh and trend == "Bullish" and swing_highs[-1] > max(swing_highs[:-1])
+    choch = (trend == "Bullish" and sl < fl) or (trend == "Bearish" and sh > fh)
 
     return {
         "structure":      structure,
@@ -234,181 +242,188 @@ def detect_market_structure(candles: list) -> dict:
         "sequence":       sequence,
         "swing_high":     round(sh, 2),
         "swing_low":      round(sl, 2),
-        "strength_pct":   strength_pct,
-        "strength_label": strength_label,
+        "strength_pct":   sp,
+        "strength_label": sl_label,
+        "bos":            bos,
+        "choch":          choch,
     }
-
-# ─────────────────────────────────────────────
-# CANDLESTICK PATTERN DETECTION
-# ─────────────────────────────────────────────
 
 def detect_candlestick_patterns(candles: list) -> list:
-    """Detect common single and two-candle reversal/continuation patterns."""
     patterns = []
     if len(candles) < 3: return patterns
+    c0, c1, c2 = candles[-3], candles[-2], candles[-1]
 
-    c0 = candles[-3]  # 3 candles ago
-    c1 = candles[-2]  # previous candle
-    c2 = candles[-1]  # current/last candle
+    def body(c):        return abs(c["close"] - c["open"])
+    def rng(c):         return c["high"] - c["low"]
+    def bull(c):        return c["close"] > c["open"]
+    def bear(c):        return c["close"] < c["open"]
+    def uw(c):          return c["high"] - max(c["close"], c["open"])
+    def lw(c):          return min(c["close"], c["open"]) - c["low"]
 
-    def body(c):   return abs(c["close"] - c["open"])
-    def range_(c): return c["high"] - c["low"]
-    def is_bull(c): return c["close"] > c["open"]
-    def is_bear(c): return c["close"] < c["open"]
-    def upper_wick(c): return c["high"] - max(c["close"], c["open"])
-    def lower_wick(c): return min(c["close"], c["open"]) - c["low"]
+    b2, r2 = body(c2), rng(c2)
 
-    b2, r2 = body(c2), range_(c2)
-
-    # ── Bullish patterns ──────────────────────
-    # Hammer: small body at top, long lower wick (>2x body), tiny upper wick
-    if is_bull(c2) and lower_wick(c2) > body(c2)*2 and upper_wick(c2) < body(c2)*0.3 and b2 > 0:
-        patterns.append({"name": "Hammer", "direction": "Bullish", "strength": "Moderate"})
-
-    # Bullish Engulfing
-    if is_bear(c1) and is_bull(c2) and c2["open"] < c1["close"] and c2["close"] > c1["open"]:
-        patterns.append({"name": "Bullish Engulfing", "direction": "Bullish", "strength": "Strong"})
-
-    # Morning Star (3-candle)
-    if is_bear(c0) and body(c1) < body(c0)*0.3 and is_bull(c2) and c2["close"] > (c0["open"]+c0["close"])/2:
-        patterns.append({"name": "Morning Star", "direction": "Bullish", "strength": "Strong"})
-
-    # Bullish Marubozu: big bull candle, tiny wicks
-    if is_bull(c2) and upper_wick(c2) < b2*0.1 and lower_wick(c2) < b2*0.1 and b2 > r2*0.85:
-        patterns.append({"name": "Bullish Marubozu", "direction": "Bullish", "strength": "Strong"})
-
-    # Dragonfly Doji: open ≈ close ≈ high, long lower wick
-    if b2 < r2*0.05 and lower_wick(c2) > r2*0.7:
-        patterns.append({"name": "Dragonfly Doji", "direction": "Bullish", "strength": "Moderate"})
-
-    # ── Bearish patterns ──────────────────────
-    # Shooting Star: small body at bottom, long upper wick
-    if is_bear(c2) and upper_wick(c2) > body(c2)*2 and lower_wick(c2) < body(c2)*0.3 and b2 > 0:
-        patterns.append({"name": "Shooting Star", "direction": "Bearish", "strength": "Moderate"})
-
-    # Bearish Engulfing
-    if is_bull(c1) and is_bear(c2) and c2["open"] > c1["close"] and c2["close"] < c1["open"]:
-        patterns.append({"name": "Bearish Engulfing", "direction": "Bearish", "strength": "Strong"})
-
-    # Evening Star (3-candle)
-    if is_bull(c0) and body(c1) < body(c0)*0.3 and is_bear(c2) and c2["close"] < (c0["open"]+c0["close"])/2:
-        patterns.append({"name": "Evening Star", "direction": "Bearish", "strength": "Strong"})
-
-    # Bearish Marubozu
-    if is_bear(c2) and upper_wick(c2) < b2*0.1 and lower_wick(c2) < b2*0.1 and b2 > r2*0.85:
-        patterns.append({"name": "Bearish Marubozu", "direction": "Bearish", "strength": "Strong"})
-
-    # Gravestone Doji: open ≈ close ≈ low, long upper wick
-    if b2 < r2*0.05 and upper_wick(c2) > r2*0.7:
-        patterns.append({"name": "Gravestone Doji", "direction": "Bearish", "strength": "Moderate"})
-
-    # ── Neutral ──────────────────────────────
-    if b2 < r2*0.05:
-        if not any(p["name"] in ("Dragonfly Doji", "Gravestone Doji") for p in patterns):
-            patterns.append({"name": "Doji", "direction": "Neutral", "strength": "Weak"})
-
-    # Add reliability rating to every detected pattern
     RELIABILITY = {
-        "Hammer":            "Moderate",
-        "Bullish Engulfing": "High",
-        "Morning Star":      "High",
-        "Bullish Marubozu":  "High",
-        "Dragonfly Doji":    "Moderate",
-        "Shooting Star":     "Moderate",
-        "Bearish Engulfing": "High",
-        "Evening Star":      "High",
-        "Bearish Marubozu":  "High",
-        "Gravestone Doji":   "Moderate",
-        "Doji":              "Low",
+        "Hammer": "Moderate", "Bullish Engulfing": "High",
+        "Morning Star": "High", "Bullish Marubozu": "High",
+        "Dragonfly Doji": "Moderate", "Shooting Star": "Moderate",
+        "Bearish Engulfing": "High", "Evening Star": "High",
+        "Bearish Marubozu": "High", "Gravestone Doji": "Moderate",
+        "Doji": "Low",
     }
-    for p in patterns:
-        p["reliability"] = RELIABILITY.get(p["name"], "Moderate")
+
+    def add(name, direction, strength):
+        patterns.append({"name": name, "direction": direction,
+                         "strength": strength,
+                         "reliability": RELIABILITY.get(name, "Moderate")})
+
+    if bull(c2) and lw(c2) > b2 * 2 and uw(c2) < b2 * 0.3 and b2 > 0:
+        add("Hammer", "Bullish", "Moderate")
+    if bear(c1) and bull(c2) and c2["open"] < c1["close"] and c2["close"] > c1["open"]:
+        add("Bullish Engulfing", "Bullish", "Strong")
+    if bear(c0) and body(c1) < body(c0) * 0.3 and bull(c2) and c2["close"] > (c0["open"] + c0["close"]) / 2:
+        add("Morning Star", "Bullish", "Strong")
+    if bull(c2) and uw(c2) < b2 * 0.1 and lw(c2) < b2 * 0.1 and b2 > r2 * 0.85:
+        add("Bullish Marubozu", "Bullish", "Strong")
+    if b2 < r2 * 0.05 and lw(c2) > r2 * 0.7:
+        add("Dragonfly Doji", "Bullish", "Moderate")
+    if bear(c2) and uw(c2) > b2 * 2 and lw(c2) < b2 * 0.3 and b2 > 0:
+        add("Shooting Star", "Bearish", "Moderate")
+    if bull(c1) and bear(c2) and c2["open"] > c1["close"] and c2["close"] < c1["open"]:
+        add("Bearish Engulfing", "Bearish", "Strong")
+    if bull(c0) and body(c1) < body(c0) * 0.3 and bear(c2) and c2["close"] < (c0["open"] + c0["close"]) / 2:
+        add("Evening Star", "Bearish", "Strong")
+    if bear(c2) and uw(c2) < b2 * 0.1 and lw(c2) < b2 * 0.1 and b2 > r2 * 0.85:
+        add("Bearish Marubozu", "Bearish", "Strong")
+    if b2 < r2 * 0.05 and uw(c2) > r2 * 0.7:
+        add("Gravestone Doji", "Bearish", "Moderate")
+    if b2 < r2 * 0.05 and not any(p["name"] in ("Dragonfly Doji", "Gravestone Doji") for p in patterns):
+        add("Doji", "Neutral", "Weak")
 
     return patterns
 
-# ─────────────────────────────────────────────
-# MULTI-TIMEFRAME
-# ─────────────────────────────────────────────
+def detect_fvg(candles: list) -> list:
+    fvgs = []
+    window = candles[-30:] if len(candles) >= 30 else candles
+    for i in range(1, len(window) - 1):
+        cp, cn = window[i - 1], window[i + 1]
+        if cp["high"] < cn["low"]:
+            fvgs.append({"type": "Bullish", "low": round(cp["high"], 2),
+                         "high": round(cn["low"], 2),
+                         "midpoint": round((cp["high"] + cn["low"]) / 2, 2)})
+        elif cp["low"] > cn["high"]:
+            fvgs.append({"type": "Bearish", "low": round(cn["high"], 2),
+                         "high": round(cp["low"], 2),
+                         "midpoint": round((cp["low"] + cn["high"]) / 2, 2)})
+    return fvgs[-3:]
 
-def analyze_timeframe(symbol: str, interval_min: int, label: str) -> dict:
-    candles = fetch_candles(symbol, interval_min)
-    if len(candles) < 55:
-        return {"label": label, "decision": "N/A", "structure": "N/A", "trend": "N/A",
-                "rsi": 0, "ema20": 0, "ema50": 0}
-    closes = [c["close"] for c in candles]
-    e20 = ema(closes, 20); e50 = ema(closes, 50)
-    r   = rsi(closes, 14)
-    ms  = detect_market_structure(candles)
+def detect_liquidity(candles: list, current_price: float) -> dict:
+    tol    = current_price * 0.002
+    recent = candles[-20:]
+    highs  = [c["high"] for c in recent]
+    lows   = [c["low"]  for c in recent]
+    rh, rl = max(highs), min(lows)
+    eq_h   = len([h for h in highs if abs(h - rh) <= tol]) >= 2
+    eq_l   = len([l for l in lows  if abs(l - rl) <= tol]) >= 2
+    last   = candles[-1]
+    ph = max(c["high"] for c in candles[-6:-1]) if len(candles) >= 6 else rh
+    pl = min(c["low"]  for c in candles[-6:-1]) if len(candles) >= 6 else rl
+    swept_high = last["high"] > ph and last["close"] < ph
+    swept_low  = last["low"]  < pl and last["close"] > pl
+    sweep = None
+    if swept_high:
+        sweep = {"direction": "Above previous high", "signal": "Potential bearish reversal"}
+    elif swept_low:
+        sweep = {"direction": "Below previous low",  "signal": "Potential bullish reversal"}
+    return {
+        "buy_side_level":     round(rh, 2),
+        "sell_side_level":    round(rl, 2),
+        "equal_highs":        eq_h,
+        "equal_highs_level":  round(rh, 2) if eq_h else None,
+        "equal_lows":         eq_l,
+        "equal_lows_level":   round(rl, 2) if eq_l else None,
+        "sweep":              sweep,
+    }
 
-    bull = e20 > e50 and r < 70 and ms["trend"] == "Bullish"
-    bear = e20 < e50 and r > 30 and ms["trend"] == "Bearish"
-    dec  = "BUY" if bull else ("SELL" if bear else "HOLD")
-
-    return {"label": label, "decision": dec, "structure": ms["structure"],
-            "trend": ms["trend"], "rsi": r, "ema20": e20, "ema50": e50}
+def analyze_levels(candles: list, current_price: float) -> dict:
+    tol    = current_price * 0.005
+    recent = candles[-50:]
+    sl     = round(min(c["low"]  for c in recent), 2)
+    rl     = round(max(c["high"] for c in recent), 2)
+    st     = sum(1 for c in recent if abs(c["low"]  - sl) <= tol)
+    rt     = sum(1 for c in recent if abs(c["high"] - rl) <= tol)
+    def lbl(t): return "High" if t >= 4 else ("Moderate" if t >= 2 else "Low")
+    return {"support": sl, "support_touches": st, "support_strength": lbl(st),
+            "resistance": rl, "resistance_touches": rt, "resistance_strength": lbl(rt)}
 
 def multi_timeframe(symbol: str) -> list:
     frames = [("15m", 15), ("1H", 60), ("4H", 240), ("Daily", 1440)]
-    return [analyze_timeframe(symbol, mins, lbl) for lbl, mins in frames]
+    results = []
+    for lbl, mins in frames:
+        candles = fetch_candles(symbol, mins)
+        if len(candles) < 55:
+            results.append({"label": lbl, "decision": "N/A",
+                            "structure": "N/A", "trend": "N/A", "rsi": 0})
+            continue
+        closes = [c["close"] for c in candles]
+        e20    = ema(closes, 20)
+        e50    = ema(closes, 50)
+        r      = rsi(closes, 14)
+        ms     = detect_market_structure(candles)
+        bull   = e20 > e50 and r < 70 and ms["trend"] == "Bullish"
+        bear   = e20 < e50 and r > 30 and ms["trend"] == "Bearish"
+        dec    = "BUY" if bull else ("SELL" if bear else "HOLD")
+        results.append({"label": lbl, "decision": dec,
+                        "structure": ms["structure"], "trend": ms["trend"], "rsi": r})
+    return results
 
-def mtf_summary(frames: list) -> dict:
+def mtf_summary(frames: list) -> str:
     buys  = sum(1 for f in frames if f["decision"] == "BUY")
     sells = sum(1 for f in frames if f["decision"] == "SELL")
-    if buys >= 3:   bias, wait = "Long-term Bullish",  False
-    elif sells >= 3: bias, wait = "Long-term Bearish",  False
-    elif buys > sells: bias, wait = "Short-term Bearish, Long-term Bullish", True
-    elif sells > buys: bias, wait = "Short-term Bullish, Long-term Bearish", True
-    else:              bias, wait = "Mixed — No clear bias", True
-    return {"bias": bias, "wait_for_confirmation": wait, "buys": buys, "sells": sells}
+    if buys >= 3:    return "Long-term Bullish"
+    if sells >= 3:   return "Long-term Bearish"
+    if buys > sells: return "Short-term Bearish · Long-term Bullish — Wait for confirmation"
+    if sells > buys: return "Short-term Bullish · Long-term Bearish — Wait for confirmation"
+    return "Mixed — No clear bias. Wait for confirmation."
 
-# ─────────────────────────────────────────────
-# CONFIDENCE SCORE
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  CONFIDENCE SCORE  (max 100)
+# ══════════════════════════════════════════════
 
-def compute_confidence(ms: dict, closes: list, candles: list,
-                        e20: float, e50: float, r: float,
+def compute_confidence(ms: dict, e20: float, e50: float, r: float,
                         macd_line: float, macd_sig: float,
                         patterns: list, vol: dict, decision: str) -> dict:
     scores = {
         "Market Structure": 0,
-        "EMA Alignment":   0,
-        "RSI":             0,
-        "MACD":            0,
-        "Candlestick":     0,
-        "Volume":          0,
+        "EMA Alignment":    0,
+        "RSI":              0,
+        "MACD":             0,
+        "Candlestick":      0,
+        "Volume":           0,
     }
     is_buy  = "BUY"  in decision
     is_sell = "SELL" in decision
 
-    # Market Structure (20 pts)
     if (is_buy  and ms["trend"] == "Bullish") or \
        (is_sell and ms["trend"] == "Bearish"):
         scores["Market Structure"] = 20
 
-    # EMA Alignment (15 pts)
-    if (is_buy  and e20 > e50) or (is_sell and e20 < e50):
+    if (is_buy and e20 > e50) or (is_sell and e20 < e50):
         scores["EMA Alignment"] = 15
 
-    # RSI (10 pts)
     if is_buy  and 40 < r < 65: scores["RSI"] = 10
     elif is_sell and 35 < r < 60: scores["RSI"] = 10
-    elif is_buy  and r < 40:    scores["RSI"] = 5   # oversold, potential bounce
-    elif is_sell and r > 65:    scores["RSI"] = 5   # overbought, potential drop
+    elif is_buy  and r <= 40:   scores["RSI"] = 5
+    elif is_sell and r >= 65:   scores["RSI"] = 5
 
-    # MACD (15 pts)
-    if (is_buy  and macd_line > macd_sig) or \
-       (is_sell and macd_line < macd_sig):
+    if (is_buy and macd_line > macd_sig) or (is_sell and macd_line < macd_sig):
         scores["MACD"] = 15
 
-    # Candlestick (20 pts)
     matching = [p for p in patterns if
                 (is_buy  and p["direction"] == "Bullish") or
                 (is_sell and p["direction"] == "Bearish")]
     if matching:
-        strong = any(p["strength"] == "Strong" for p in matching)
-        scores["Candlestick"] = 20 if strong else 10
+        scores["Candlestick"] = 20 if any(p["strength"] == "Strong" for p in matching) else 10
 
-    # Volume (20 pts)
     if vol["relative"] >= 1.2:
         if (is_buy  and vol["buy_pressure"]  > 55) or \
            (is_sell and vol["sell_pressure"] > 55):
@@ -418,440 +433,313 @@ def compute_confidence(ms: dict, closes: list, candles: list,
     elif vol["relative"] >= 0.8:
         scores["Volume"] = 5
 
-    total = sum(scores.values())
-    return {"breakdown": scores, "total": total}
+    return {"breakdown": scores, "total": sum(scores.values())}
 
+# ══════════════════════════════════════════════
+#  FULL ANALYSIS
+# ══════════════════════════════════════════════
 
-# ─────────────────────────────────────────────
-# SUPPORT / RESISTANCE WITH TOUCH COUNT
-# ─────────────────────────────────────────────
-
-def analyze_levels(candles: list, current_price: float) -> dict:
-    """
-    Find key support and resistance levels and count how many times
-    price has tested (touched) each level within a tolerance band.
-    """
-    tolerance = current_price * 0.005  # 0.5% band
-
-    recent = candles[-50:]
-    lows   = [c["low"]  for c in recent]
-    highs  = [c["high"] for c in recent]
-
-    support_level    = round(min(lows), 2)
-    resistance_level = round(max(highs), 2)
-
-    # Count touches: how many candles came within tolerance of the level
-    support_touches = sum(
-        1 for c in recent if abs(c["low"] - support_level) <= tolerance
-    )
-    resistance_touches = sum(
-        1 for c in recent if abs(c["high"] - resistance_level) <= tolerance
-    )
-
-    def strength_label(touches: int) -> str:
-        if touches >= 4: return "High"
-        if touches >= 2: return "Moderate"
-        return "Low"
-
-    return {
-        "support":            support_level,
-        "support_touches":    support_touches,
-        "support_strength":   strength_label(support_touches),
-        "resistance":         resistance_level,
-        "resistance_touches": resistance_touches,
-        "resistance_strength":strength_label(resistance_touches),
-    }
-
-# ─────────────────────────────────────────────
-# FAIR VALUE GAP (FVG)
-# ─────────────────────────────────────────────
-
-def detect_fvg(candles: list) -> list:
-    """
-    A Fair Value Gap occurs when candle[i-1].high < candle[i+1].low (bullish FVG)
-    or candle[i-1].low > candle[i+1].high (bearish FVG).
-    Looks at the last 30 candles and returns up to 3 most recent gaps.
-    """
-    fvgs = []
-    window = candles[-30:] if len(candles) >= 30 else candles
-    for i in range(1, len(window)-1):
-        c_prev = window[i-1]
-        c_mid  = window[i]
-        c_next = window[i+1]
-        # Bullish FVG: gap up — prev high below next low
-        if c_prev["high"] < c_next["low"]:
-            fvgs.append({
-                "type":       "Bullish",
-                "low":        round(c_prev["high"], 2),
-                "high":       round(c_next["low"], 2),
-                "midpoint":   round((c_prev["high"] + c_next["low"]) / 2, 2),
-            })
-        # Bearish FVG: gap down — prev low above next high
-        elif c_prev["low"] > c_next["high"]:
-            fvgs.append({
-                "type":       "Bearish",
-                "low":        round(c_next["high"], 2),
-                "high":       round(c_prev["low"], 2),
-                "midpoint":   round((c_prev["low"] + c_next["high"]) / 2, 2),
-            })
-    return fvgs[-3:]  # Return last 3 FVGs
-
-# ─────────────────────────────────────────────
-# LIQUIDITY ANALYSIS
-# ─────────────────────────────────────────────
-
-def detect_liquidity(candles: list, current_price: float) -> dict:
-    """
-    Identifies:
-    - Buy-side liquidity (BSL): resting above equal/recent highs
-    - Sell-side liquidity (SSL): resting below equal/recent lows
-    - Liquidity sweep: price breaking a prior high/low then reversing
-    - Equal highs / equal lows (within 0.2% tolerance)
-    """
-    tolerance = current_price * 0.002
-    recent    = candles[-20:]
-    highs     = [c["high"]  for c in recent]
-    lows      = [c["low"]   for c in recent]
-
-    recent_high = max(highs)
-    recent_low  = min(lows)
-
-    # Equal highs: multiple candles with highs within tolerance of the max
-    eq_highs = [round(h, 2) for h in highs if abs(h - recent_high) <= tolerance]
-    eq_lows  = [round(l, 2) for l in lows  if abs(l - recent_low)  <= tolerance]
-
-    equal_highs_detected = len(eq_highs) >= 2
-    equal_lows_detected  = len(eq_lows)  >= 2
-
-    # Sweep detection: last candle wick pierced prior high or low then closed back
-    last = candles[-1]
-    prev_high = max(c["high"] for c in candles[-6:-1]) if len(candles) >= 6 else recent_high
-    prev_low  = min(c["low"]  for c in candles[-6:-1]) if len(candles) >= 6 else recent_low
-
-    swept_high = last["high"] > prev_high and last["close"] < prev_high
-    swept_low  = last["low"]  < prev_low  and last["close"] > prev_low
-
-    sweep_note = None
-    if swept_high:
-        sweep_note = {"direction": "Above previous high", "signal": "Potential bearish reversal"}
-    elif swept_low:
-        sweep_note = {"direction": "Below previous low", "signal": "Potential bullish reversal"}
-
-    return {
-        "buy_side_level":       round(recent_high, 2),
-        "sell_side_level":      round(recent_low,  2),
-        "equal_highs":          equal_highs_detected,
-        "equal_highs_level":    round(recent_high, 2) if equal_highs_detected else None,
-        "equal_lows":           equal_lows_detected,
-        "equal_lows_level":     round(recent_low, 2)  if equal_lows_detected  else None,
-        "sweep":                sweep_note,
-    }
-
-# ─────────────────────────────────────────────
-# MAIN COMPUTE
-# ─────────────────────────────────────────────
-
-def compute_all(candles: list, current_price: float) -> dict:
-    closes = [c["close"] for c in candles] + [current_price]
-
-    e20 = ema(closes, 20)
-    e50 = ema(closes, 50)
-    r   = rsi(closes, 14)
-    atr14 = atr(candles, 14)
-    ml, ms_macd, mh = macd(closes)
-    ms  = detect_market_structure(candles)
-    vol = volume_analysis(candles)
+def full_analysis(candles: list, current_price: float, symbol: str) -> dict:
+    closes   = [c["close"] for c in candles] + [current_price]
+    e20      = ema(closes, 20)
+    e50      = ema(closes, 50)
+    r        = rsi(closes, 14)
+    atr14    = atr_calc(candles, 14)
+    ml, ms_m, mh = macd_calc(closes)
+    ms       = detect_market_structure(candles)
+    vol      = volume_analysis(candles)
     patterns = detect_candlestick_patterns(candles)
+    fvgs     = detect_fvg(candles)
+    liq      = detect_liquidity(candles, current_price)
+    levels   = analyze_levels(candles, current_price)
+    frames   = multi_timeframe(symbol)
+    bias     = mtf_summary(frames)
 
-    levels     = analyze_levels(candles, current_price)
-    support    = levels["support"]
-    resistance = levels["resistance"]
-    fvgs       = detect_fvg(candles)
-    liquidity  = detect_liquidity(candles, current_price)
-
+    # Decision
     bull = e20 > e50 and r < 70 and ms["trend"] == "Bullish"
     bear = e20 < e50 and r > 30 and ms["trend"] == "Bearish"
 
     if bull:
-        decision    = "BUY (Long)"
-        stop_loss   = round(current_price - atr14*1.5, 2)
-        take_profit = round(current_price + atr14*3.0, 2)
+        decision    = "BUY"
+        stop_loss   = round(current_price - atr14 * 1.5, 2)
+        take_profit = round(current_price + atr14 * 3.0, 2)
     elif bear:
-        decision    = "SELL (Short)"
-        stop_loss   = round(current_price + atr14*1.5, 2)
-        take_profit = round(current_price - atr14*3.0, 2)
+        decision    = "SELL"
+        stop_loss   = round(current_price + atr14 * 1.5, 2)
+        take_profit = round(current_price - atr14 * 3.0, 2)
     else:
-        decision    = "HOLD"
-        stop_loss   = round(current_price - atr14*1.5, 2)
-        take_profit = round(current_price + atr14*1.5, 2)
+        decision    = "WAIT"
+        stop_loss   = round(current_price - atr14 * 1.5, 2)
+        take_profit = round(current_price + atr14 * 1.5, 2)
 
     sl_dist = abs(current_price - stop_loss)
     tp_dist = abs(take_profit - current_price)
-    rr = round(tp_dist/sl_dist, 2) if sl_dist > 0 else 0.0
+    rr      = round(tp_dist / sl_dist, 1) if sl_dist > 0 else 0.0
 
-    conf = compute_confidence(ms, closes, candles, e20, e50, r,
-                              ml, ms_macd, patterns, vol, decision)
+    conf = compute_confidence(ms, e20, e50, r, ml, ms_m, patterns, vol, decision)
+
+    # Build reason list — only TRUE reasons
+    reasons = []
+    if e20 < e50: reasons.append("EMA20 is below EMA50 — bearish trend")
+    elif e20 > e50: reasons.append("EMA20 is above EMA50 — bullish trend")
+    if ms["trend"] == "Bearish": reasons.append(f"Bearish market structure ({ms['sequence']})")
+    elif ms["trend"] == "Bullish": reasons.append(f"Bullish market structure ({ms['sequence']})")
+    rsi_lbl = rsi_label(r)
+    if rsi_lbl == "Overbought":   reasons.append(f"RSI is overbought ({r}) — momentum weakening")
+    elif rsi_lbl == "Oversold":   reasons.append(f"RSI is oversold ({r}) — potential reversal zone")
+    else:                          reasons.append(f"RSI is neutral ({r}) — no extreme momentum")
+    if vol["sell_pressure"] > 55: reasons.append("Volume favors sellers")
+    elif vol["buy_pressure"] > 55: reasons.append("Volume favors buyers")
+    else:                          reasons.append("Volume is balanced — no strong conviction")
+    bear_pats = [p for p in patterns if p["direction"] == "Bearish"]
+    bull_pats = [p for p in patterns if p["direction"] == "Bullish"]
+    if bear_pats:
+        reasons.append(f"{bear_pats[0]['name']} detected — bearish signal")
+    elif bull_pats:
+        reasons.append(f"{bull_pats[0]['name']} detected — bullish signal")
+    else:
+        reasons.append("No significant candlestick pattern detected")
+    if ms["bos"]:   reasons.append("Break of Structure (BOS) confirmed")
+    if ms["choch"]: reasons.append("Change of Character (CHoCH) — potential trend shift")
+    if liq["sweep"]:
+        reasons.append(f"Liquidity sweep {liq['sweep']['direction']} — {liq['sweep']['signal']}")
+
+    trend_label = ms["trend"] if ms["trend"] in ("Bullish", "Bearish") else "Sideways"
 
     return {
-        "decision":    decision,
-        "ema20":       e20, "ema50": e50, "rsi14": r,
-        "atr14":       atr14,
-        "macd_line":   ml, "macd_signal": ms_macd, "macd_hist": mh,
-        "support":     support, "resistance": resistance,
-        "stop_loss":   stop_loss, "take_profit": take_profit,
-        "rr_ratio":    rr,
-        "structure":   ms["structure"],
-        "trend":       ms["trend"],
-        "strength_pct":   ms["strength_pct"],
-        "strength_label": ms["strength_label"],
-        "swing_high":  ms["swing_high"],
-        "swing_low":   ms["swing_low"],
-        "volume":      vol,
-        "patterns":    patterns,
-        "confidence":  conf,
-        "sequence":    ms["sequence"],
-        "fvgs":        fvgs,
-        "liquidity":   liquidity,
-        "levels":      levels,
+        "decision":     decision,
+        "trend":        trend_label,
+        "confidence":   conf,
+        "reasons":      reasons,
+        "entry":        current_price,
+        "stop_loss":    stop_loss,
+        "take_profit":  take_profit,
+        "rr":           rr,
+        "risk_usd":     0,  # filled later
+        "e20": e20, "e50": e50,
+        "rsi14": r, "rsi_label": rsi_label(r),
+        "atr14": atr14,
+        "macd_line": ml, "macd_signal": ms_m, "macd_hist": mh,
+        "ms": ms,
+        "vol": vol,
+        "patterns": patterns,
+        "fvgs": fvgs,
+        "liq": liq,
+        "levels": levels,
+        "frames": frames,
+        "bias": bias,
     }
 
-# ─────────────────────────────────────────────
-# AI REASONING
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  AI NARRATIVE
+# ══════════════════════════════════════════════
 
-def get_ai_reasoning(symbol: str, price: float, ind: dict) -> str:
-    pat_str = ", ".join(p["name"] for p in ind["patterns"]) if ind["patterns"] else "None detected"
-    vol = ind["volume"]
-    conf_total = ind["confidence"]["total"]
-
-    fallback = f"""Signal: {ind['decision']} | Confidence: {conf_total}%
-
-Market is in a {ind['trend']} {ind['structure']} structure ({ind['strength_label']} — {ind['strength_pct']}%).
-EMA20 (${ind['ema20']:,.2f}) is {'above' if ind['ema20'] > ind['ema50'] else 'below'} EMA50 (${ind['ema50']:,.2f}), {'confirming bullish momentum' if ind['ema20'] > ind['ema50'] else 'confirming bearish pressure'}.
-RSI at {ind['rsi14']} — {'neutral, room to run' if 40 < ind['rsi14'] < 60 else 'overbought, caution' if ind['rsi14'] > 65 else 'oversold, watch for reversal'}.
-MACD line {ind['macd_line']:+.2f} vs signal {ind['macd_signal']:+.2f} ({'bullish crossover' if ind['macd_line'] > ind['macd_signal'] else 'bearish crossover'}).
-Candlestick: {pat_str}.
-Volume: current {vol['current']:.2f} vs 20-avg {vol['avg20']:.2f} (x{vol['relative']}). Buy pressure {vol['buy_pressure']}% / Sell pressure {vol['sell_pressure']}%.
-
-Key reasons:
-• {ind['structure']} market structure {'confirms uptrend' if ind['trend']=='Bullish' else 'confirms downtrend' if ind['trend']=='Bearish' else 'signals consolidation'}
-• EMA alignment {'supports longs' if ind['ema20'] > ind['ema50'] else 'supports shorts'}
-• RSI at {ind['rsi14']} {'not overbought, momentum intact' if ind['rsi14'] < 65 else 'overbought — risk of pullback'}
-• {'Volume confirms move' if vol['relative'] >= 1.2 else 'Volume below average — low conviction'}
-• Candlestick: {pat_str}
-
-Stop Loss: ${ind['stop_loss']:,.2f} | Take Profit: ${ind['take_profit']:,.2f} | R:R 1:{ind['rr_ratio']}"""
-
-    if not client:
-        return fallback
-
+def get_ai_narrative(a: dict, symbol: str, price: float) -> str:
+    reasons_str = "\n".join(f"- {r}" for r in a["reasons"])
+    fallback = (
+        f"Signal: {a['decision']} | Confidence: {a['confidence']['total']}%\n\n"
+        f"The market is in a {a['trend']} {a['ms']['structure']} structure "
+        f"({a['ms']['strength_label']} — {a['ms']['strength_pct']}%). "
+        f"EMA20 (${a['e20']:,.2f}) is {'above' if a['e20'] > a['e50'] else 'below'} "
+        f"EMA50 (${a['e50']:,.2f}), {'confirming bullish momentum' if a['e20'] > a['e50'] else 'confirming bearish pressure'}. "
+        f"RSI at {a['rsi14']} is {a['rsi_label'].lower()}. "
+        f"Volume: buyers {a['vol']['buy_pressure']}% / sellers {a['vol']['sell_pressure']}%.\n\n"
+        f"Key reasons:\n{reasons_str}\n\n"
+        f"Stop Loss: ${a['stop_loss']:,.2f} | Take Profit: ${a['take_profit']:,.2f} | R:R 1:{a['rr']}"
+    )
+    if not client: return fallback
     try:
-        pat_dir = ", ".join(f"{p['name']} ({p['direction']}, {p['strength']})" for p in ind["patterns"]) or "None"
-        conf_bd = "\n".join(f"  {k}: {v}/max" for k, v in ind["confidence"]["breakdown"].items())
-        prompt = f"""You are Aria, a professional crypto trading AI. Write a structured market analysis report.
-DO NOT just list numbers — explain what they mean together. Be concise but insightful.
+        pat_str = ", ".join(f"{p['name']} ({p['direction']}, {p['reliability']} reliability)"
+                            for p in a["patterns"]) or "None detected"
+        prompt = f"""You are Aria, a professional crypto trading AI. Write a concise market analysis.
+DO NOT repeat raw numbers without context. Explain what the data means for the trade.
 
 Symbol: {symbol} | Price: ${price:,.2f}
-Signal: {ind['decision']} | Confidence: {conf_total}%
-Structure: {ind['structure']} ({ind['strength_label']} — {ind['strength_pct']}%) | Trend: {ind['trend']}
-EMA20: ${ind['ema20']:,.2f} | EMA50: ${ind['ema50']:,.2f}
-RSI14: {ind['rsi14']} | ATR14: ${ind['atr14']:,.2f}
-MACD Line: {ind['macd_line']} | MACD Signal: {ind['macd_signal']} | Hist: {ind['macd_hist']}
-Support: ${ind['support']:,.2f} | Resistance: ${ind['resistance']:,.2f}
-Stop Loss: ${ind['stop_loss']:,.2f} | Take Profit: ${ind['take_profit']:,.2f} | R:R 1:{ind['rr_ratio']}
-Volume: current {vol['current']:.1f} vs avg {vol['avg20']:.1f} (x{vol['relative']}) | Buy {vol['buy_pressure']}% / Sell {vol['sell_pressure']}%
-Candlestick Patterns: {pat_dir}
-Confidence Breakdown:
-{conf_bd}
+Decision: {a['decision']} | Confidence: {a['confidence']['total']}%
+Trend: {a['trend']} | Structure: {a['ms']['structure']} ({a['ms']['sequence']})
+Strength: {a['ms']['strength_label']} ({a['ms']['strength_pct']}%)
+EMA20: ${a['e20']:,.2f} | EMA50: ${a['e50']:,.2f}
+RSI: {a['rsi14']} ({a['rsi_label']})
+MACD: {a['macd_line']:+.2f} vs signal {a['macd_signal']:+.2f}
+Volume: buy {a['vol']['buy_pressure']}% / sell {a['vol']['sell_pressure']}% (relative x{a['vol']['relative']})
+Patterns: {pat_str}
+Stop Loss: ${a['stop_loss']:,.2f} | Take Profit: ${a['take_profit']:,.2f} | R:R 1:{a['rr']}
 
-Write the response in this format:
+Write:
 SIGNAL: [decision]
+
 REASON:
-• [market structure insight with numbers]
-• [EMA insight with numbers]
+• [market structure with sequence]
+• [EMA insight]
 • [RSI insight]
-• [MACD insight]
 • [volume insight]
 • [candlestick insight]
-RISK ASSESSMENT: [Low/Moderate/High] — [one sentence why]
-CONCLUSION: [2-3 sentence narrative explaining the overall market picture and what to watch for]
-Max 200 words."""
-        response = client.chat.completions.create(
+
+RISK: [Low/Moderate/High] — [one sentence why]
+
+CONCLUSION: [2–3 sentences explaining the full market picture and what to watch for]
+
+Max 180 words. Be direct and specific."""
+        resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=300, temperature=0.4,
-        )
-        return response.choices[0].message.content.strip()
+            max_tokens=280, temperature=0.4)
+        return resp.choices[0].message.content.strip()
     except Exception:
         return fallback
 
-# ─────────────────────────────────────────────
-# HTML HELPERS
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  HTML HELPERS
+# ══════════════════════════════════════════════
 
-def conf_bar_html(total: int, breakdown: dict) -> str:
-    color = "#2ecc71" if total >= 70 else ("#f39c12" if total >= 45 else "#e74c3c")
-    rows  = "".join(
-        f"<tr><td style='color:#888;padding:2px 8px 2px 0'>{k}</td>"
-        f"<td style='color:#fff'>{v} pts</td></tr>"
-        for k, v in breakdown.items()
-    )
-    return f"""
-<div style='margin:10px 0'>
-  <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px'>
-    <span style='font-size:12px;color:#888'>Confidence Score</span>
-    <span style='font-weight:bold;color:{color};font-size:16px'>{total}%</span>
-  </div>
-  <div style='background:#111;border-radius:6px;overflow:hidden;height:10px'>
-    <div style='width:{total}%;height:100%;background:{color}'></div>
-  </div>
-  <details style='margin-top:8px;font-size:12px;color:#888;cursor:pointer'>
-    <summary>Score breakdown</summary>
-    <table style='margin-top:6px'>{rows}</table>
-  </details>
-</div>"""
+CSS = """
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', Arial, sans-serif; background: #0a0a0a; color: #d0d0d0; padding: 20px; max-width: 680px; margin: 0 auto; }
+h1 { color: #fff; font-size: 20px; margin-bottom: 2px; }
+.sub { color: #444; font-size: 12px; margin-bottom: 20px; }
+.card { background: #141414; border: 1px solid #222; padding: 20px; border-radius: 12px; margin: 10px 0; }
+.label { font-size: 11px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+.value { font-size: 22px; font-weight: bold; color: #fff; }
+.value-sm { font-size: 15px; font-weight: bold; color: #fff; }
+.decision-buy  { color: #2ecc71; font-size: 32px; font-weight: bold; letter-spacing: 2px; }
+.decision-sell { color: #e74c3c; font-size: 32px; font-weight: bold; letter-spacing: 2px; }
+.decision-wait { color: #f39c12; font-size: 32px; font-weight: bold; letter-spacing: 2px; }
+.conf-bar-wrap { background: #1a1a1a; border-radius: 6px; height: 8px; margin-top: 6px; overflow: hidden; }
+.row { display: flex; gap: 12px; flex-wrap: wrap; }
+.col { flex: 1; min-width: 120px; }
+.reason-list { list-style: none; padding: 0; margin: 0; }
+.reason-list li { padding: 5px 0; color: #bbb; font-size: 13px; border-bottom: 1px solid #1e1e1e; }
+.reason-list li:last-child { border-bottom: none; }
+.reason-list li::before { content: "•  "; color: #555; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 8px 0; }
+.metric { background: #0f0f0f; border-radius: 8px; padding: 12px; }
+.metric .val { font-size: 14px; font-weight: bold; color: #fff; }
+.metric .lbl { font-size: 10px; color: #555; margin-top: 3px; text-transform: uppercase; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 16px; font-size: 12px; font-weight: bold; }
+.adv-toggle { width: 100%; background: #141414; border: 1px solid #222; color: #888; font-size: 13px; padding: 12px 20px; border-radius: 12px; cursor: pointer; text-align: left; margin-top: 10px; }
+.adv-toggle:hover { background: #1a1a1a; color: #ccc; }
+.adv-section { display: none; }
+.adv-section.open { display: block; }
+.adv-card { background: #141414; border: 1px solid #1e1e1e; border-radius: 10px; padding: 16px; margin: 8px 0; }
+.adv-card h3 { color: #888; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+.adv-card .explain { font-size: 12px; color: #555; margin-bottom: 10px; font-style: italic; border-left: 2px solid #222; padding-left: 10px; }
+.tf-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #1a1a1a; font-size: 13px; }
+.tf-row:last-child { border-bottom: none; }
+hr { border: none; border-top: 1px solid #1a1a1a; margin: 14px 0; }
+.nav { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.btn { display: inline-block; padding: 9px 18px; border-radius: 8px; background: #1e1e1e; color: #ccc; text-decoration: none; font-size: 13px; border: 1px solid #2a2a2a; }
+.btn-buy  { background: #0d2e1a; color: #2ecc71; border-color: #1a5c2e; }
+.btn-sell { background: #2e0d0d; color: #e74c3c; border-color: #5c1a1a; }
+details summary { cursor: pointer; outline: none; }
+"""
 
-def pattern_badges(patterns: list) -> str:
-    if not patterns:
-        return "<span style='color:#555;font-size:13px'>No pattern detected on this candle</span>"
+def decision_class(d: str) -> str:
+    return {"BUY": "decision-buy", "SELL": "decision-sell", "WAIT": "decision-wait"}.get(d, "decision-wait")
+
+def trend_color(t: str) -> str:
+    return {"Bullish": "#2ecc71", "Bearish": "#e74c3c"}.get(t, "#f39c12")
+
+def conf_color(c: int) -> str:
+    return "#2ecc71" if c >= 65 else ("#f39c12" if c >= 40 else "#e74c3c")
+
+def pattern_text(patterns: list) -> str:
+    if not patterns: return "No significant pattern detected"
+    p = patterns[0]
+    c = "#2ecc71" if p["direction"] == "Bullish" else ("#e74c3c" if p["direction"] == "Bearish" else "#888")
+    return (f"<span style='color:{c};font-weight:bold'>{p['name']}</span> "
+            f"<span style='color:#555;font-size:12px'>({p['direction']} · {p['reliability']} reliability)</span>")
+
+def adv_patterns_html(patterns: list) -> str:
+    if not patterns: return "<p style='color:#555;font-size:13px'>No pattern detected</p>"
     out = ""
     for p in patterns:
-        c   = "#2ecc71" if p["direction"]=="Bullish" else ("#e74c3c" if p["direction"]=="Bearish" else "#888")
-        rel = p.get("reliability", "Moderate")
-        rel_color = "#2ecc71" if rel=="High" else ("#f39c12" if rel=="Moderate" else "#888")
-        out += (
-            f"<div style='display:inline-block;margin:4px;padding:8px 14px;border-radius:10px;"
-            f"border:1px solid {c};background:{c}11;vertical-align:top'>"
-            f"<div style='color:{c};font-weight:bold;font-size:13px'>{p['name']}</div>"
-            f"<div style='color:#888;font-size:11px;margin-top:2px'>{p['direction']} · {p['strength']}</div>"
-            f"<div style='color:{rel_color};font-size:11px'>Reliability: <b>{rel}</b></div>"
-            f"</div>"
-        )
+        c = "#2ecc71" if p["direction"] == "Bullish" else ("#e74c3c" if p["direction"] == "Bearish" else "#888")
+        out += (f"<div style='padding:8px 0;border-bottom:1px solid #1a1a1a'>"
+                f"<span style='color:{c};font-weight:bold'>{p['name']}</span>"
+                f"<span style='color:#555;font-size:12px;margin-left:8px'>{p['direction']} · {p['strength']} · Reliability: {p['reliability']}</span>"
+                f"</div>")
     return out
 
-def fvg_html(fvgs: list) -> str:
-    if not fvgs:
-        return "<div class='card'><h3>⚡ Fair Value Gap (FVG)</h3><p style='color:#555;font-size:13px'>No FVG detected in recent candles</p></div>"
-    rows = ""
+def adv_fvg_html(fvgs: list) -> str:
+    if not fvgs: return "<p style='color:#555;font-size:13px'>No FVG detected in recent candles</p>"
+    out = ""
     for g in reversed(fvgs):
-        c = "#2ecc71" if g["type"]=="Bullish" else "#e74c3c"
-        rows += (
-            f"<div style='background:#111;border-radius:8px;padding:12px;margin:6px 0;"
-            f"border-left:3px solid {c}'>"
-            f"<span style='color:{c};font-weight:bold'>{g['type']} FVG</span>"
-            f"<span style='color:#555;font-size:12px;float:right'>${g['low']:,.2f} – ${g['high']:,.2f}</span><br>"
-            f"<span style='color:#888;font-size:12px'>Midpoint: ${g['midpoint']:,.2f} · "
-            f"{'Acts as support' if g['type']=='Bullish' else 'Acts as resistance'}</span>"
-            f"</div>"
-        )
-    return f"<div class='card'><h3>⚡ Fair Value Gap (FVG)</h3>{rows}</div>"
+        c = "#2ecc71" if g["type"] == "Bullish" else "#e74c3c"
+        out += (f"<div style='padding:8px 0;border-bottom:1px solid #1a1a1a'>"
+                f"<span style='color:{c};font-weight:bold'>{g['type']} FVG</span>"
+                f"<span style='color:#888;font-size:12px;margin-left:8px'>${g['low']:,.2f} – ${g['high']:,.2f}</span>"
+                f"<span style='color:#555;font-size:11px;margin-left:8px'>mid ${g['midpoint']:,.2f}</span>"
+                f"</div>")
+    return out
 
-def liquidity_html(liq: dict) -> str:
-    rows = ""
-    # Buy-side liquidity
-    rows += (
-        f"<div style='background:#111;border-radius:8px;padding:12px;margin:6px 0;border-left:3px solid #2ecc71'>"
-        f"<span style='color:#2ecc71;font-weight:bold'>Buy-Side Liquidity (BSL)</span>"
-        f"<span style='color:#555;font-size:12px;float:right'>${liq['buy_side_level']:,.2f}</span><br>"
-        f"<span style='color:#888;font-size:12px'>Resting above — short stops / breakout orders cluster here</span>"
-        f"</div>"
-    )
-    # Sell-side liquidity
-    rows += (
-        f"<div style='background:#111;border-radius:8px;padding:12px;margin:6px 0;border-left:3px solid #e74c3c'>"
-        f"<span style='color:#e74c3c;font-weight:bold'>Sell-Side Liquidity (SSL)</span>"
-        f"<span style='color:#555;font-size:12px;float:right'>${liq['sell_side_level']:,.2f}</span><br>"
-        f"<span style='color:#888;font-size:12px'>Resting below — long stops / sell orders cluster here</span>"
-        f"</div>"
-    )
-    # Equal highs
+def adv_liq_html(liq: dict) -> str:
+    out = (f"<div style='padding:6px 0;font-size:13px'>"
+           f"<span style='color:#2ecc71'>Buy-Side Liquidity (BSL)</span>"
+           f"<span style='color:#555;font-size:12px;margin-left:8px'>${liq['buy_side_level']:,.2f}</span></div>"
+           f"<div style='padding:6px 0;font-size:13px'>"
+           f"<span style='color:#e74c3c'>Sell-Side Liquidity (SSL)</span>"
+           f"<span style='color:#555;font-size:12px;margin-left:8px'>${liq['sell_side_level']:,.2f}</span></div>")
     if liq["equal_highs"]:
-        rows += (
-            f"<div style='background:#111;border-radius:8px;padding:12px;margin:6px 0;border-left:3px solid #f39c12'>"
-            f"<span style='color:#f39c12;font-weight:bold'>Equal Highs Detected</span>"
-            f"<span style='color:#555;font-size:12px;float:right'>${liq['equal_highs_level']:,.2f}</span><br>"
-            f"<span style='color:#888;font-size:12px'>Buy-side liquidity resting above — sweep risk</span>"
-            f"</div>"
-        )
-    # Equal lows
+        out += (f"<div style='padding:6px 0;font-size:13px;color:#f39c12'>"
+                f"Equal Highs @ ${liq['equal_highs_level']:,.2f} — Buy-side liquidity resting above</div>")
     if liq["equal_lows"]:
-        rows += (
-            f"<div style='background:#111;border-radius:8px;padding:12px;margin:6px 0;border-left:3px solid #f39c12'>"
-            f"<span style='color:#f39c12;font-weight:bold'>Equal Lows Detected</span>"
-            f"<span style='color:#555;font-size:12px;float:right'>${liq['equal_lows_level']:,.2f}</span><br>"
-            f"<span style='color:#888;font-size:12px'>Sell-side liquidity resting below — sweep risk</span>"
-            f"</div>"
-        )
-    # Sweep
+        out += (f"<div style='padding:6px 0;font-size:13px;color:#f39c12'>"
+                f"Equal Lows @ ${liq['equal_lows_level']:,.2f} — Sell-side liquidity resting below</div>")
     if liq["sweep"]:
         sw = liq["sweep"]
-        rows += (
-            f"<div style='background:#1a1000;border-radius:8px;padding:12px;margin:6px 0;border:1px solid #f39c12'>"
-            f"<span style='color:#f39c12;font-weight:bold'>⚠️ Liquidity Sweep Detected</span><br>"
-            f"<span style='color:#ccc;font-size:13px'>{sw['direction']}</span><br>"
-            f"<span style='color:#f39c12;font-size:12px'>{sw['signal']}</span>"
-            f"</div>"
-        )
-    return f"<div class='card'><h3>💧 Liquidity Analysis</h3>{rows}</div>"
+        out += (f"<div style='padding:8px;margin-top:6px;background:#1a1200;border-radius:6px;"
+                f"border:1px solid #f39c12;font-size:13px'>"
+                f"<span style='color:#f39c12;font-weight:bold'>⚠️ Liquidity Sweep</span> — "
+                f"{sw['direction']} · {sw['signal']}</div>")
+    return out
 
-def levels_html(levels: dict) -> str:
-    def bar(strength):
-        w = {"High": 100, "Moderate": 60, "Low": 30}.get(strength, 40)
-        c = {"High": "#2ecc71", "Moderate": "#f39c12", "Low": "#e74c3c"}.get(strength, "#888")
-        return (f"<div style='background:#1a1a1a;border-radius:4px;height:6px;margin-top:4px'>"
+def adv_levels_html(levels: dict) -> str:
+    def bar(s):
+        w = {"High": 100, "Moderate": 60, "Low": 30}.get(s, 40)
+        c = {"High": "#2ecc71", "Moderate": "#f39c12", "Low": "#e74c3c"}.get(s, "#888")
+        return (f"<div style='background:#0f0f0f;border-radius:4px;height:5px;margin-top:4px'>"
                 f"<div style='width:{w}%;height:100%;background:{c};border-radius:4px'></div></div>")
-
-    rows = ""
-    for label, level, touches, strength in [
-        ("Support", levels["support"], levels["support_touches"], levels["support_strength"]),
-        ("Resistance", levels["resistance"], levels["resistance_touches"], levels["resistance_strength"]),
+    out = ""
+    for lbl, lvl, touches, strength, color in [
+        ("Support",    levels["support"],    levels["support_touches"],    levels["support_strength"],    "#2ecc71"),
+        ("Resistance", levels["resistance"], levels["resistance_touches"], levels["resistance_strength"], "#e74c3c"),
     ]:
-        c = "#2ecc71" if label=="Support" else "#e74c3c"
-        rows += (
-            f"<div style='background:#111;border-radius:8px;padding:12px;margin:6px 0'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center'>"
-            f"<span style='color:{c};font-weight:bold'>{label}</span>"
-            f"<span style='color:#fff;font-weight:bold'>${level:,.2f}</span>"
-            f"</div>"
-            f"<div style='color:#666;font-size:12px;margin-top:4px'>Tested {touches}x · Strength: <b style='color:#ccc'>{strength}</b></div>"
-            f"{bar(strength)}"
-            f"</div>"
-        )
-    return f"<div class='card'><h3>📌 Key Levels</h3>{rows}</div>"
+        out += (f"<div style='padding:8px 0;border-bottom:1px solid #1a1a1a'>"
+                f"<div style='display:flex;justify-content:space-between'>"
+                f"<span style='color:{color};font-size:13px;font-weight:bold'>{lbl}</span>"
+                f"<span style='color:#fff;font-size:13px'>${lvl:,.2f}</span></div>"
+                f"<div style='color:#555;font-size:12px;margin-top:2px'>"
+                f"Tested {touches}× · Strength: <span style='color:#ccc'>{strength}</span></div>"
+                f"{bar(strength)}</div>")
+    return out
 
-def mtf_html(frames: list, summary: dict) -> str:
-    rows = ""
-    for f in frames:
-        sc = "#2ecc71" if f["decision"]=="BUY" else ("#e74c3c" if f["decision"]=="SELL" else "#888")
-        tc = "#2ecc71" if f["trend"]=="Bullish" else ("#e74c3c" if f["trend"]=="Bearish" else "#888")
-        rows += f"""
-<div style='background:#111;border-radius:8px;padding:12px;margin:6px 0;display:flex;justify-content:space-between;align-items:center'>
-  <span style='color:#aaa;font-weight:bold;width:50px'>{f['label']}</span>
-  <span style='color:{sc};font-weight:bold;width:60px'>{f['decision']}</span>
-  <span style='color:{tc};font-size:12px'>{f['structure']}</span>
-  <span style='color:#555;font-size:11px'>RSI {f['rsi']}</span>
-</div>"""
+def adv_conf_html(conf: dict) -> str:
+    total = conf["total"]
+    c     = conf_color(total)
+    rows  = ""
+    maxes = {"Market Structure": 20, "EMA Alignment": 15, "RSI": 10,
+             "MACD": 15, "Candlestick": 20, "Volume": 20}
+    for k, v in conf["breakdown"].items():
+        mx  = maxes.get(k, 20)
+        pct = int(v / mx * 100) if mx > 0 else 0
+        bc  = "#2ecc71" if pct >= 70 else ("#f39c12" if pct >= 40 else "#555")
+        rows += (f"<div style='padding:6px 0;border-bottom:1px solid #1a1a1a'>"
+                 f"<div style='display:flex;justify-content:space-between;font-size:13px'>"
+                 f"<span style='color:#888'>{k}</span>"
+                 f"<span style='color:#fff'>{v} / {mx}</span></div>"
+                 f"<div style='background:#0f0f0f;border-radius:4px;height:4px;margin-top:4px'>"
+                 f"<div style='width:{pct}%;height:100%;background:{bc};border-radius:4px'></div></div>"
+                 f"</div>")
+    return (f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px'>"
+            f"<span style='color:#888;font-size:13px'>Total Confidence</span>"
+            f"<span style='color:{c};font-size:22px;font-weight:bold'>{total}%</span></div>"
+            f"<div style='background:#0f0f0f;border-radius:6px;height:8px;overflow:hidden;margin-bottom:12px'>"
+            f"<div style='width:{total}%;height:100%;background:{c}'></div></div>"
+            f"{rows}")
 
-    bias_color = "#2ecc71" if "Bullish" in summary["bias"] else ("#e74c3c" if "Bearish" in summary["bias"] else "#f39c12")
-    wait_note  = "<p style='color:#f39c12;font-size:12px;margin-top:8px'>⚠️ Wait for confirmation — timeframes conflict</p>" if summary["wait_for_confirmation"] else ""
-    return f"""
-<div class='card'>
-  <h3>🕐 Multi-Timeframe Analysis</h3>
-  {rows}
-  <div style='margin-top:12px;padding:10px;background:#111;border-radius:8px;border-left:3px solid {bias_color}'>
-    <span style='color:{bias_color};font-weight:bold'>{summary['bias']}</span>
-    {wait_note}
-  </div>
-</div>"""
-
-def calc_pl(position: dict, current_price: float):
-    e, sz, rk = position["entry_price"], position["size"], position["risk_amount"]
-    pl = (current_price-e)*sz if position["side"]=="BUY" else (e-current_price)*sz
-    return round(pl,2), round((pl/rk*100) if rk>0 else 0, 2)
-
-# ─────────────────────────────────────────────
-# ROUTES
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  ROUTES
+# ══════════════════════════════════════════════
 
 @app.get("/health")
 @app.get("/")
@@ -870,134 +758,282 @@ async def dashboard(symbol: str = "BTCUSD"):
     current_price = fetch_current_price(symbol)
 
     if not candles:
-        return HTMLResponse("""<html><body style='background:#111;color:#e74c3c;font-family:Arial;padding:30px'>
-        <h2>⚠️ Market data unavailable</h2><p>Kraken and CoinGecko both failed. Retry shortly.</p>
-        <a href='/analyze' style='color:#aaa'>↻ Retry</a></body></html>""")
+        return HTMLResponse(
+            f"<html><body style='background:#0a0a0a;color:#e74c3c;font-family:Arial;padding:30px'>"
+            f"<h2>⚠️ Market data unavailable</h2>"
+            f"<p style='margin-top:10px;color:#888'>Both Kraken and CoinGecko failed. Retry shortly.</p>"
+            f"<a href='/analyze' style='color:#555;display:block;margin-top:20px'>↻ Retry</a>"
+            f"</body></html>")
 
-    ind   = compute_all(candles, current_price)
-    ai    = get_ai_reasoning(symbol, current_price, ind)
-    frames= multi_timeframe(symbol)
-    summ  = mtf_summary(frames)
+    a             = full_analysis(candles, current_price, symbol)
+    risk_usd      = round(balance * MAX_RISK_PERCENT / 100, 2)
+    a["risk_usd"] = risk_usd
+    pos_size      = round(risk_usd / (current_price * 0.02), 6)
+    narrative     = get_ai_narrative(a, symbol, current_price)
 
-    risk_amount   = round(balance * MAX_RISK_PERCENT / 100, 2)
-    position_size = round(risk_amount / (current_price * 0.02), 6)
+    dc   = decision_class(a["decision"])
+    tc   = trend_color(a["trend"])
+    cc   = conf_color(a["confidence"]["total"])
+    conf = a["confidence"]["total"]
 
-    vol = ind["volume"]
-    conf= ind["confidence"]
-    sig_color   = "#2ecc71" if "BUY" in ind["decision"] else ("#e74c3c" if "SELL" in ind["decision"] else "#f39c12")
-    trend_color = "#2ecc71" if ind["trend"]=="Bullish" else ("#e74c3c" if ind["trend"]=="Bearish" else "#f39c12")
-
+    # ── Open position block ──
     pl_block = ""
     if position and position["symbol"] == symbol:
         pl, pl_pct = calc_pl(position, current_price)
         pc = "#2ecc71" if pl >= 0 else "#e74c3c"
-        pl_block = (f"<div class='card'><h3>📊 Open Position</h3>"
-                    f"<p>Side: <b>{position['side']}</b> | Entry: <b>${position['entry_price']:,.2f}</b> | Size: {position['size']} {symbol[:3]}</p>"
-                    f"<p style='color:{pc};font-size:18px;font-weight:bold'>P/L: ${pl:,.2f} ({pl_pct:.1f}%)</p>"
-                    f"<a href='/close' class='btn btn-sell'>❌ Close Position</a></div>")
-    else:
-        pl_block = "<div class='card'><p style='color:#555'>No open position</p></div>"
+        pl_block = (
+            f"<div class='card'>"
+            f"<div class='label'>Open Position</div>"
+            f"<div style='margin-top:8px;font-size:13px'>"
+            f"<span style='color:#ccc'>{position['side']} {position['size']} {symbol[:3]}</span>"
+            f"<span style='color:#555;margin:0 8px'>@</span>"
+            f"<span style='color:#ccc'>${position['entry_price']:,.2f}</span>"
+            f"</div>"
+            f"<div style='color:{pc};font-size:20px;font-weight:bold;margin-top:6px'>"
+            f"P/L: ${pl:,.2f} ({pl_pct:.1f}%)</div>"
+            f"<a href='/close' class='btn btn-sell' style='display:inline-block;margin-top:10px'>Close Position</a>"
+            f"</div>"
+        )
+
+    # ── Reasons HTML ──
+    reasons_html = "".join(f"<li>{r}</li>" for r in a["reasons"])
+
+    # ── Multi-timeframe HTML ──
+    tf_rows = ""
+    for f in a["frames"]:
+        sc = "#2ecc71" if f["decision"] == "BUY" else ("#e74c3c" if f["decision"] == "SELL" else "#888")
+        tc2 = trend_color(f["trend"]) if f["trend"] in ("Bullish", "Bearish") else "#888"
+        tf_rows += (
+            f"<div class='tf-row'>"
+            f"<span style='color:#888;width:50px'>{f['label']}</span>"
+            f"<span style='color:{sc};font-weight:bold;width:50px'>{f['decision']}</span>"
+            f"<span style='color:{tc2};font-size:12px'>{f['structure']}</span>"
+            f"<span style='color:#555;font-size:11px'>RSI {f['rsi']}</span>"
+            f"</div>"
+        )
+
+    bias_color = "#2ecc71" if "Bullish" in a["bias"] else ("#e74c3c" if "Bearish" in a["bias"] else "#f39c12")
+
+    # ── RSI label for main dashboard ──
+    rsi_c = "#e74c3c" if a["rsi_label"] == "Overbought" else ("#2ecc71" if a["rsi_label"] == "Oversold" else "#888")
 
     html = f"""<!DOCTYPE html>
-<html><head><title>Aria Dashboard</title>
-<style>
-  *{{box-sizing:border-box;margin:0;padding:0}}
-  body{{font-family:'Segoe UI',Arial,sans-serif;background:#0d0d0d;color:#ddd;padding:24px}}
-  h1{{color:#fff;margin-bottom:4px}}
-  .sub{{color:#444;font-size:12px;margin-bottom:20px}}
-  .card{{background:#1a1a1a;border:1px solid #252525;padding:20px;border-radius:12px;margin:12px 0}}
-  .card h2{{color:#fff;margin-bottom:14px}}
-  .card h3{{color:#999;margin-bottom:10px;font-size:14px;text-transform:uppercase;letter-spacing:1px}}
-  .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin:12px 0}}
-  .metric{{background:#111;border-radius:8px;padding:12px;text-align:center}}
-  .metric .val{{font-size:14px;font-weight:bold;color:#fff}}
-  .metric .lbl{{font-size:10px;color:#555;margin-top:4px;text-transform:uppercase}}
-  .badge{{display:inline-block;padding:6px 18px;border-radius:20px;font-weight:bold;font-size:15px;color:#fff;background:{sig_color}}}
-  .struct{{display:inline-block;padding:4px 12px;border-radius:20px;font-size:12px;border:1px solid {trend_color};color:{trend_color}}}
-  .reason{{background:#111;border-radius:8px;padding:16px;font-size:13px;line-height:1.8;color:#ccc;white-space:pre-wrap;margin-top:10px}}
-  .nav{{margin-top:16px;display:flex;gap:10px;flex-wrap:wrap}}
-  .btn{{display:inline-block;padding:9px 18px;border-radius:8px;background:#2a2a2a;color:#ddd;text-decoration:none;font-size:13px}}
-  .btn-buy{{background:#1a5c2e;color:#2ecc71}}
-  .btn-sell{{background:#5c1a1a;color:#e74c3c}}
-  hr{{border:none;border-top:1px solid #1e1e1e;margin:14px 0}}
-  details summary{{outline:none}}
-</style>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aria — {symbol}</title>
+<style>{CSS}</style>
 </head><body>
+
 <h1>🌱 Aria AI Trading Dashboard</h1>
-<p class="sub">Paper Trading · {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} · Data: Kraken / CoinGecko</p>
+<p class="sub">{symbol} · {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} · Paper Trading</p>
+
+<!-- ═══ MAIN DASHBOARD ═══ -->
 
 <div class="card">
-  <h2>{symbol} · Real-Time Analysis</h2>
-  <p style="margin-bottom:10px">
-    Signal: <span class="badge">{ind['decision']}</span>
-    &nbsp;
-    Structure: <span class="struct">{ind['structure']}</span>
-    &nbsp;
-    <span style="color:{trend_color};font-size:13px">Trend: <b>{ind['strength_label']} ({ind['strength_pct']}%)</b></span>
-  </p>
-  <div style="background:#111;border-radius:8px;padding:10px 14px;margin:8px 0;font-size:13px">
-    <span style="color:#555;font-size:11px;text-transform:uppercase;letter-spacing:1px">Swing Sequence</span><br>
-    <span style="color:{trend_color};font-weight:bold;letter-spacing:2px;font-size:14px">{ind['sequence']}</span>
-  </div>
-
-
-  {conf_bar_html(conf['total'], conf['breakdown'])}
-
-  <div class="grid">
-    <div class="metric"><div class="val">${current_price:,.2f}</div><div class="lbl">Price</div></div>
-    <div class="metric"><div class="val">${ind['ema20']:,.2f}</div><div class="lbl">EMA 20</div></div>
-    <div class="metric"><div class="val">${ind['ema50']:,.2f}</div><div class="lbl">EMA 50</div></div>
-    <div class="metric"><div class="val">{ind['rsi14']}</div><div class="lbl">RSI 14</div></div>
-    <div class="metric"><div class="val">{ind['macd_line']:+.2f}</div><div class="lbl">MACD</div></div>
-    <div class="metric"><div class="val">${ind['atr14']:,.2f}</div><div class="lbl">ATR 14</div></div>
-    <div class="metric"><div class="val">${ind['swing_high']:,.2f}</div><div class="lbl">Swing High</div></div>
-    <div class="metric"><div class="val">${ind['swing_low']:,.2f}</div><div class="lbl">Swing Low</div></div>
-    <div class="metric"><div class="val">${ind['support']:,.2f}</div><div class="lbl">Support</div></div>
-    <div class="metric"><div class="val">${ind['resistance']:,.2f}</div><div class="lbl">Resistance</div></div>
-    <div class="metric"><div class="val">${ind['stop_loss']:,.2f}</div><div class="lbl">Stop Loss</div></div>
-    <div class="metric"><div class="val">${ind['take_profit']:,.2f}</div><div class="lbl">Take Profit</div></div>
-    <div class="metric"><div class="val">1:{ind['rr_ratio']}</div><div class="lbl">Risk/Reward</div></div>
-    <div class="metric"><div class="val">${risk_amount:.2f}</div><div class="lbl">Risk (1%)</div></div>
-    <div class="metric"><div class="val">{position_size}</div><div class="lbl">Size ({symbol[:3]})</div></div>
-    <div class="metric"><div class="val">${balance:,.2f}</div><div class="lbl">Balance</div></div>
-  </div>
-
-  <hr>
-  <h3>📊 Volume</h3>
-  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr))">
-    <div class="metric"><div class="val">{vol['current']:.2f}</div><div class="lbl">Current Vol</div></div>
-    <div class="metric"><div class="val">{vol['avg20']:.2f}</div><div class="lbl">20-Avg Vol</div></div>
-    <div class="metric"><div class="val">x{vol['relative']}</div><div class="lbl">Relative</div></div>
-    <div class="metric"><div class="val" style="color:#2ecc71">{vol['buy_pressure']}%</div><div class="lbl">Buy Pressure</div></div>
-    <div class="metric"><div class="val" style="color:#e74c3c">{vol['sell_pressure']}%</div><div class="lbl">Sell Pressure</div></div>
-  </div>
-
-  <hr>
-  <h3>🕯️ Candlestick Pattern</h3>
-  <div style="margin:8px 0">{pattern_badges(ind['patterns'])}</div>
-
-  <hr>
-  <h3>🤖 AI Reasoning</h3>
-  <div class="reason">{ai}</div>
+  <div class="label">Current Price</div>
+  <div class="value">${current_price:,.2f}</div>
 </div>
 
-{mtf_html(frames, summ)}
+<div class="card">
+  <div class="label">Decision</div>
+  <div class="{dc}">{a['decision']}</div>
+</div>
 
-{levels_html(ind['levels'])}
+<div class="card">
+  <div class="label">Confidence</div>
+  <div class="value">{conf}%</div>
+  <div class="conf-bar-wrap">
+    <div style="width:{conf}%;height:100%;background:{cc};border-radius:6px"></div>
+  </div>
+</div>
 
-{fvg_html(ind['fvgs'])}
+<div class="row">
+  <div class="card col">
+    <div class="label">Trend</div>
+    <div class="value-sm" style="color:{tc}">{a['trend']}</div>
+  </div>
+  <div class="card col">
+    <div class="label">Market Structure</div>
+    <div class="value-sm" style="color:{tc}">{a['ms']['sequence']}</div>
+  </div>
+</div>
 
-{liquidity_html(ind['liquidity'])}
+<div class="card">
+  <div class="label">Reason</div>
+  <ul class="reason-list" style="margin-top:8px">
+    {reasons_html}
+  </ul>
+</div>
+
+<div class="row">
+  <div class="card col">
+    <div class="label">Entry Price</div>
+    <div class="value-sm">${current_price:,.2f}</div>
+  </div>
+  <div class="card col">
+    <div class="label">Stop Loss</div>
+    <div class="value-sm" style="color:#e74c3c">${a['stop_loss']:,.2f}</div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="card col">
+    <div class="label">Take Profit</div>
+    <div class="value-sm" style="color:#2ecc71">${a['take_profit']:,.2f}</div>
+  </div>
+  <div class="card col">
+    <div class="label">Risk / Reward</div>
+    <div class="value-sm">1 : {a['rr']}</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="label">Risk Amount (1% of balance)</div>
+  <div class="value-sm">${risk_usd:.2f}</div>
+</div>
 
 {pl_block}
 
 <div class="nav">
-  <a href="/execute?symbol={symbol}&side=BUY" class="btn btn-buy">🟢 Execute BUY</a>
-  <a href="/execute?symbol={symbol}&side=SELL" class="btn btn-sell">🔴 Execute SELL</a>
+  <a href="/execute?symbol={symbol}&side=BUY"  class="btn btn-buy">Execute BUY</a>
+  <a href="/execute?symbol={symbol}&side=SELL" class="btn btn-sell">Execute SELL</a>
   <a href="/analyze?symbol=BTCUSD" class="btn">₿ BTC</a>
   <a href="/analyze?symbol=ETHUSD" class="btn">Ξ ETH</a>
-  <a href="/journal" class="btn">📖 Journal</a>
+  <a href="/journal" class="btn">Journal</a>
 </div>
+
+<!-- ═══ ADVANCED ANALYSIS ═══ -->
+
+<button class="adv-toggle" onclick="toggleAdv()">
+  ▸ Full Market Analysis — tap to expand
+</button>
+
+<div class="adv-section" id="advSection">
+
+  <div class="adv-card">
+    <h3>Market Structure</h3>
+    <div class="explain">Shows whether the market is making higher highs and higher lows (bullish) or lower highs and lower lows (bearish). The sequence below shows the last 5 swing points.</div>
+    <div style="font-size:15px;color:{tc};font-weight:bold;margin-bottom:8px">{a['ms']['sequence']}</div>
+    <div class="grid2">
+      <div class="metric"><div class="val">{a['ms']['structure']}</div><div class="lbl">Classification</div></div>
+      <div class="metric"><div class="val" style="color:{tc}">{a['ms']['trend']}</div><div class="lbl">Trend</div></div>
+      <div class="metric"><div class="val">${a['ms']['swing_high']:,.2f}</div><div class="lbl">Swing High</div></div>
+      <div class="metric"><div class="val">${a['ms']['swing_low']:,.2f}</div><div class="lbl">Swing Low</div></div>
+      <div class="metric"><div class="val">{a['ms']['strength_label']}</div><div class="lbl">Strength</div></div>
+      <div class="metric"><div class="val">{a['ms']['strength_pct']}%</div><div class="lbl">Strength %</div></div>
+    </div>
+    {"<div style='padding:8px;margin-top:6px;background:#0d2e1a;border-radius:6px;color:#2ecc71;font-size:13px'>✅ Break of Structure (BOS) confirmed — trend continuation signal</div>" if a['ms']['bos'] else ""}
+    {"<div style='padding:8px;margin-top:6px;background:#2e1a0d;border-radius:6px;color:#f39c12;font-size:13px'>⚠️ Change of Character (CHoCH) detected — possible trend reversal</div>" if a['ms']['choch'] else ""}
+  </div>
+
+  <div class="adv-card">
+    <h3>EMA — Exponential Moving Average</h3>
+    <div class="explain">EMA20 above EMA50 suggests bullish trend. EMA20 below EMA50 suggests bearish trend.</div>
+    <div class="grid2">
+      <div class="metric"><div class="val">${a['e20']:,.2f}</div><div class="lbl">EMA 20</div></div>
+      <div class="metric"><div class="val">${a['e50']:,.2f}</div><div class="lbl">EMA 50</div></div>
+    </div>
+    <div style="margin-top:8px;font-size:13px;color:#888">
+      EMA20 is <b style="color:{'#2ecc71' if a['e20'] > a['e50'] else '#e74c3c'}">
+      {'above' if a['e20'] > a['e50'] else 'below'}</b> EMA50 —
+      {'bullish trend confirmed' if a['e20'] > a['e50'] else 'bearish trend confirmed'}
+    </div>
+  </div>
+
+  <div class="adv-card">
+    <h3>RSI — Relative Strength Index</h3>
+    <div class="explain">Above 70 = Overbought. Below 30 = Oversold. Between 30–70 = Neutral.</div>
+    <div class="grid2">
+      <div class="metric"><div class="val">{a['rsi14']}</div><div class="lbl">RSI 14</div></div>
+      <div class="metric"><div class="val" style="color:{rsi_c}">{a['rsi_label']}</div><div class="lbl">Status</div></div>
+    </div>
+  </div>
+
+  <div class="adv-card">
+    <h3>MACD</h3>
+    <div class="explain">When the MACD line crosses above the signal line it is bullish. When it crosses below it is bearish.</div>
+    <div class="grid2">
+      <div class="metric"><div class="val">{a['macd_line']:+.2f}</div><div class="lbl">MACD Line</div></div>
+      <div class="metric"><div class="val">{a['macd_signal']:+.2f}</div><div class="lbl">Signal</div></div>
+      <div class="metric"><div class="val">{a['macd_hist']:+.2f}</div><div class="lbl">Histogram</div></div>
+      <div class="metric"><div class="val">${a['atr14']:,.2f}</div><div class="lbl">ATR 14</div></div>
+    </div>
+  </div>
+
+  <div class="adv-card">
+    <h3>Volume</h3>
+    <div class="explain">High volume confirms stronger moves. Low volume suggests weaker conviction. Buying pressure above 55% favors bulls, selling pressure above 55% favors bears.</div>
+    <div class="grid2">
+      <div class="metric"><div class="val">{a['vol']['current']:.2f}</div><div class="lbl">Current Volume</div></div>
+      <div class="metric"><div class="val">{a['vol']['avg20']:.2f}</div><div class="lbl">20-Candle Avg</div></div>
+      <div class="metric"><div class="val">x{a['vol']['relative']}</div><div class="lbl">Relative</div></div>
+      <div class="metric"><div class="val" style="color:#2ecc71">{a['vol']['buy_pressure']}%</div><div class="lbl">Buying Pressure</div></div>
+      <div class="metric"><div class="val" style="color:#e74c3c">{a['vol']['sell_pressure']}%</div><div class="lbl">Selling Pressure</div></div>
+    </div>
+  </div>
+
+  <div class="adv-card">
+    <h3>Candlestick Pattern</h3>
+    <div class="explain">Shows whether a bullish or bearish reversal or continuation pattern has formed on the latest candles.</div>
+    {adv_patterns_html(a['patterns'])}
+  </div>
+
+  <div class="adv-card">
+    <h3>Support & Resistance</h3>
+    <div class="explain">Key price levels where price has repeatedly reversed. More touches = stronger level.</div>
+    {adv_levels_html(a['levels'])}
+  </div>
+
+  <div class="adv-card">
+    <h3>Fair Value Gap (FVG)</h3>
+    <div class="explain">A Fair Value Gap is an area where price moved so quickly that little trading occurred. Price often returns to these areas before continuing its trend.</div>
+    {adv_fvg_html(a['fvgs'])}
+  </div>
+
+  <div class="adv-card">
+    <h3>Liquidity Analysis</h3>
+    <div class="explain">Liquidity shows where stop-loss orders and pending orders are likely clustered. These areas often attract price before reversals or breakouts. Equal highs and lows are especially significant — price is drawn to these levels to trigger orders before moving away.</div>
+    {adv_liq_html(a['liq'])}
+  </div>
+
+  <div class="adv-card">
+    <h3>Multi-Timeframe Analysis</h3>
+    <div class="explain">Confirms whether the signal aligns across multiple timeframes. Alignment on 3 or more timeframes increases conviction.</div>
+    {tf_rows}
+    <div style="margin-top:10px;padding:10px;background:#0f0f0f;border-radius:8px;border-left:3px solid {bias_color}">
+      <span style="color:{bias_color};font-size:13px;font-weight:bold">{a['bias']}</span>
+    </div>
+  </div>
+
+  <div class="adv-card">
+    <h3>Confidence Score Breakdown</h3>
+    <div class="explain">Confidence is calculated from 6 indicators. Each contributes a maximum number of points. A score above 65% is considered high confidence.</div>
+    {adv_conf_html(a['confidence'])}
+  </div>
+
+  <div class="adv-card">
+    <h3>AI Explanation</h3>
+    <div class="explain">Aria's full narrative analysis of the current market setup.</div>
+    <div style="font-size:13px;line-height:1.8;color:#ccc;white-space:pre-wrap;margin-top:8px">{narrative}</div>
+  </div>
+
+</div>
+
+<script>
+function toggleAdv() {{
+  var s = document.getElementById('advSection');
+  var b = document.querySelector('.adv-toggle');
+  if (s.classList.contains('open')) {{
+    s.classList.remove('open');
+    b.textContent = '▸ Full Market Analysis — tap to expand';
+  }} else {{
+    s.classList.add('open');
+    b.textContent = '▾ Full Market Analysis — tap to collapse';
+  }}
+}}
+</script>
+
 </body></html>"""
     return HTMLResponse(html)
 
@@ -1011,58 +1047,76 @@ async def api_analyze(symbol: str = "BTCUSD"):
     candles       = fetch_candles(symbol, 1440)
     current_price = fetch_current_price(symbol)
     if not candles: return {"error": "Market data unavailable"}
-    ind    = compute_all(candles, current_price)
-    ai     = get_ai_reasoning(symbol, current_price, ind)
-    frames = multi_timeframe(symbol)
-    summ   = mtf_summary(frames)
-    risk_amount   = round(balance * MAX_RISK_PERCENT / 100, 2)
-    position_size = round(risk_amount / (current_price * 0.02), 6)
+    a         = full_analysis(candles, current_price, symbol)
+    risk_usd  = round(balance * MAX_RISK_PERCENT / 100, 2)
+    a["risk_usd"] = risk_usd
     pl, pl_pct = 0.0, 0.0
     if position and position["symbol"] == symbol:
         pl, pl_pct = calc_pl(position, current_price)
     return {
         "symbol": symbol, "price": current_price,
-        "indicators": ind, "decision": ind["decision"],
-        "confidence": ind["confidence"]["total"],
-        "confidence_breakdown": ind["confidence"]["breakdown"],
-        "multi_timeframe": frames, "mtf_summary": summ,
-        "patterns": ind["patterns"],
-        "ai_reasoning": ai,
-        "risk_amount_usd": risk_amount, "position_size": position_size,
+        "decision": a["decision"], "trend": a["trend"],
+        "confidence": a["confidence"]["total"],
+        "confidence_breakdown": a["confidence"]["breakdown"],
+        "reasons": a["reasons"],
+        "entry": a["entry"], "stop_loss": a["stop_loss"],
+        "take_profit": a["take_profit"], "rr": a["rr"],
+        "risk_usd": risk_usd,
+        "market_structure": a["ms"],
+        "ema20": a["e20"], "ema50": a["e50"],
+        "rsi": a["rsi14"], "rsi_label": a["rsi_label"],
+        "macd_line": a["macd_line"], "macd_signal": a["macd_signal"],
+        "atr": a["atr14"], "volume": a["vol"],
+        "patterns": a["patterns"], "fvgs": a["fvgs"],
+        "liquidity": a["liq"], "levels": a["levels"],
+        "multi_timeframe": a["frames"], "bias": a["bias"],
         "account_balance": balance, "open_position": position,
         "unrealized_pl": pl, "unrealized_pl_pct": pl_pct,
     }
+
+
+def calc_pl(position: dict, current_price: float):
+    e, sz, rk = position["entry_price"], position["size"], position["risk_amount"]
+    pl = (current_price - e) * sz if position["side"] == "BUY" else (e - current_price) * sz
+    return round(pl, 2), round((pl / rk * 100) if rk > 0 else 0, 2)
 
 
 @app.get("/execute")
 async def execute_trade(symbol: str = Query(...), side: str = Query(...)):
     symbol = symbol.upper(); side = side.upper()
     if symbol not in VALID_SYMBOLS:
-        return HTMLResponse("<h2>❌ Invalid symbol</h2><a href='/analyze'>Back</a>")
+        return HTMLResponse("<html><body style='background:#0a0a0a;color:#e74c3c;font-family:Arial;padding:30px'><h2>❌ Invalid symbol</h2><a href='/analyze' style='color:#555'>Back</a></body></html>")
     if side not in ("BUY", "SELL"):
-        return HTMLResponse("<h2>❌ Invalid side</h2><a href='/analyze'>Back</a>")
+        return HTMLResponse("<html><body style='background:#0a0a0a;color:#e74c3c;font-family:Arial;padding:30px'><h2>❌ Invalid side</h2><a href='/analyze' style='color:#555'>Back</a></body></html>")
     balance       = load_balance()
     current_price = fetch_current_price(symbol)
-    risk_amount   = round(balance * MAX_RISK_PERCENT / 100, 2)
-    size          = round(risk_amount / (current_price * 0.02), 6)
+    risk_usd      = round(balance * MAX_RISK_PERCENT / 100, 2)
+    size          = round(risk_usd / (current_price * 0.02), 6)
     pos = {"symbol": symbol, "side": side, "entry_price": current_price,
-           "size": size, "risk_amount": risk_amount, "timestamp": datetime.utcnow().isoformat()}
+           "size": size, "risk_amount": risk_usd,
+           "timestamp": datetime.utcnow().isoformat()}
     save_position(pos)
     save_to_journal({"action": "EXECUTE_TRADE", "symbol": symbol, "side": side,
-                     "price": current_price, "size": size, "timestamp": datetime.utcnow().isoformat()})
+                     "price": current_price, "size": size,
+                     "timestamp": datetime.utcnow().isoformat()})
+    color = "#2ecc71" if side == "BUY" else "#e74c3c"
     return HTMLResponse(
-        f"<html><body style='background:#111;color:#ddd;font-family:Arial;padding:30px'>"
-        f"<h2 style='color:#2ecc71'>✅ Paper Trade Executed</h2>"
-        f"<p>{side} {size} {symbol} at ${current_price:,.2f}</p><p>Risk: ${risk_amount:.2f}</p>"
-        f"<a href='/analyze?symbol={symbol}' style='color:#aaa'>← Back to Dashboard</a></body></html>")
+        f"<html><body style='background:#0a0a0a;color:#d0d0d0;font-family:Arial;padding:30px'>"
+        f"<h2 style='color:{color}'>✅ Trade Executed</h2>"
+        f"<p style='margin-top:10px'>{side} {size} {symbol} @ ${current_price:,.2f}</p>"
+        f"<p style='color:#555;margin-top:4px'>Risk: ${risk_usd:.2f}</p>"
+        f"<a href='/analyze?symbol={symbol}' style='color:#555;display:block;margin-top:20px'>← Back to Dashboard</a>"
+        f"</body></html>")
 
 
 @app.get("/close")
 async def close_position():
     position = load_position()
     if not position:
-        return HTMLResponse("<html><body style='background:#111;color:#ddd;font-family:Arial;padding:30px'>"
-                            "<h2>No open position</h2><a href='/analyze' style='color:#aaa'>Back</a></body></html>")
+        return HTMLResponse(
+            "<html><body style='background:#0a0a0a;color:#d0d0d0;font-family:Arial;padding:30px'>"
+            "<h2>No open position</h2>"
+            "<a href='/analyze' style='color:#555;display:block;margin-top:20px'>Back</a></body></html>")
     balance       = load_balance()
     current_price = fetch_current_price(position["symbol"])
     pl, _         = calc_pl(position, current_price)
@@ -1071,14 +1125,16 @@ async def close_position():
     save_balance(new_balance); save_position(None)
     save_to_journal({"action": "CLOSE_POSITION", "symbol": closed_symbol,
                      "entry_price": position["entry_price"], "exit_price": current_price,
-                     "pl": pl, "new_balance": new_balance, "timestamp": datetime.utcnow().isoformat()})
+                     "pl": pl, "new_balance": new_balance,
+                     "timestamp": datetime.utcnow().isoformat()})
     color = "#2ecc71" if pl >= 0 else "#e74c3c"
     return HTMLResponse(
-        f"<html><body style='background:#111;color:#ddd;font-family:Arial;padding:30px'>"
+        f"<html><body style='background:#0a0a0a;color:#d0d0d0;font-family:Arial;padding:30px'>"
         f"<h2>✅ Position Closed</h2>"
-        f"<p>P/L: <b style='color:{color}'>${pl:,.2f}</b></p>"
-        f"<p>New Balance: <b>${new_balance:,.2f}</b></p>"
-        f"<a href='/analyze?symbol={closed_symbol}' style='color:#aaa'>← Back</a></body></html>")
+        f"<p style='margin-top:10px'>P/L: <b style='color:{color}'>${pl:,.2f}</b></p>"
+        f"<p style='color:#555;margin-top:4px'>New Balance: ${new_balance:,.2f}</p>"
+        f"<a href='/analyze?symbol={closed_symbol}' style='color:#555;display:block;margin-top:20px'>← Back to Dashboard</a>"
+        f"</body></html>")
 
 
 @app.get("/journal")
