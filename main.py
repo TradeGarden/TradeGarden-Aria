@@ -594,7 +594,7 @@ Max 180 words. Be direct and specific."""
 
 CSS = """
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: 'Segoe UI', Arial, sans-serif; background: #0a0a0a; color: #d0d0d0; padding: 20px; max-width: 680px; margin: 0 auto; }
+body { font-family: 'Segoe UI', Arial, sans-serif; background: #0a0a0a; color: #d0d0d0; padding: 24px; }
 h1 { color: #fff; font-size: 20px; margin-bottom: 2px; }
 .sub { color: #444; font-size: 12px; margin-bottom: 20px; }
 .card { background: #141414; border: 1px solid #222; padding: 20px; border-radius: 12px; margin: 10px 0; }
@@ -605,13 +605,13 @@ h1 { color: #fff; font-size: 20px; margin-bottom: 2px; }
 .decision-sell { color: #e74c3c; font-size: 32px; font-weight: bold; letter-spacing: 2px; }
 .decision-wait { color: #f39c12; font-size: 32px; font-weight: bold; letter-spacing: 2px; }
 .conf-bar-wrap { background: #1a1a1a; border-radius: 6px; height: 8px; margin-top: 6px; overflow: hidden; }
-.row { display: flex; gap: 12px; flex-wrap: wrap; }
+.row { display: flex; gap: 12px; flex-wrap: wrap; } .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 0; } .full-width { grid-column: 1 / -1; }
 .col { flex: 1; min-width: 120px; }
 .reason-list { list-style: none; padding: 0; margin: 0; }
 .reason-list li { padding: 5px 0; color: #bbb; font-size: 13px; border-bottom: 1px solid #1e1e1e; }
 .reason-list li:last-child { border-bottom: none; }
 .reason-list li::before { content: "•  "; color: #555; }
-.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 8px 0; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 8px 0; }
 .metric { background: #0f0f0f; border-radius: 8px; padding: 12px; }
 .metric .val { font-size: 14px; font-weight: bold; color: #fff; }
 .metric .lbl { font-size: 10px; color: #555; margin-top: 3px; text-transform: uppercase; }
@@ -829,13 +829,14 @@ async def dashboard(symbol: str = "BTCUSD"):
 <p class="sub">{symbol} · {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} · Paper Trading</p>
 
 <!-- ═══ MAIN DASHBOARD ═══ -->
+<div class="dashboard-grid">
 
 <div class="card">
   <div class="label">Current Price</div>
   <div class="value">${current_price:,.2f}</div>
 </div>
 
-<div class="card">
+<div class="card full-width">
   <div class="label">Decision</div>
   <div class="{dc}">{a['decision']}</div>
 </div>
@@ -859,7 +860,7 @@ async def dashboard(symbol: str = "BTCUSD"):
   </div>
 </div>
 
-<div class="card">
+<div class="card full-width">
   <div class="label">Reason</div>
   <ul class="reason-list" style="margin-top:8px">
     {reasons_html}
@@ -894,6 +895,7 @@ async def dashboard(symbol: str = "BTCUSD"):
 </div>
 
 {pl_block}
+</div><!-- end dashboard-grid -->
 
 <div class="nav">
   <a href="/execute?symbol={symbol}&side=BUY"  class="btn btn-buy">Execute BUY</a>
@@ -905,11 +907,9 @@ async def dashboard(symbol: str = "BTCUSD"):
 
 <!-- ═══ ADVANCED ANALYSIS ═══ -->
 
-<button class="adv-toggle" onclick="toggleAdv()">
-  ▸ Full Market Analysis — tap to expand
-</button>
+<p style="color:#333;font-size:11px;text-transform:uppercase;letter-spacing:2px;margin:20px 0 4px">Full Market Analysis</p>
 
-<div class="adv-section" id="advSection">
+<div class="adv-section open" id="advSection" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-top:12px">
 
   <div class="adv-card">
     <h3>Market Structure</h3>
@@ -1012,7 +1012,7 @@ async def dashboard(symbol: str = "BTCUSD"):
     {adv_conf_html(a['confidence'])}
   </div>
 
-  <div class="adv-card">
+  <div class="adv-card" style="grid-column:1/-1">
     <h3>AI Explanation</h3>
     <div class="explain">Aria's full narrative analysis of the current market setup.</div>
     <div style="font-size:13px;line-height:1.8;color:#ccc;white-space:pre-wrap;margin-top:8px">{narrative}</div>
@@ -1020,19 +1020,7 @@ async def dashboard(symbol: str = "BTCUSD"):
 
 </div>
 
-<script>
-function toggleAdv() {{
-  var s = document.getElementById('advSection');
-  var b = document.querySelector('.adv-toggle');
-  if (s.classList.contains('open')) {{
-    s.classList.remove('open');
-    b.textContent = '▸ Full Market Analysis — tap to expand';
-  }} else {{
-    s.classList.add('open');
-    b.textContent = '▾ Full Market Analysis — tap to collapse';
-  }}
-}}
-</script>
+
 
 </body></html>"""
     return HTMLResponse(html)
