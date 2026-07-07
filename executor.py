@@ -1,4 +1,3 @@
-cat > /mnt/user-data/outputs/aria/executor.py << 'EOF'
 """
 executor.py — Stage 4: EXECUTE
 ================================
@@ -563,5 +562,3 @@ def get_auto_status() -> dict:
         "last_decision":_auto_status["last_decision"],
         "scans_today":  _auto_status["scans_today"],
     }
-EOF
-echo "Done"
