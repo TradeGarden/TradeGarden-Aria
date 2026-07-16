@@ -204,23 +204,19 @@ def check_all_rules(side: str, analysis: dict, confidence: int,
         return {"approved": False,
                 "reason": f"RSI is oversold ({r}). Too risky to sell here. Waiting for bounce."}
 
-    # 5. Volume confirmation
-    if side == "BUY" and vol["buy_pressure"] <= 55:
+    # 5. Volume confirmation — threshold 48% (realistic for daily candles)
+    if side == "BUY" and vol["buy_pressure"] < 48:
         return {"approved": False,
-                "reason": f"Volume does not confirm buyers ({vol['buy_pressure']}% buy pressure). "
-                          f"Waiting for volume to support the move."}
-    if side == "SELL" and vol["sell_pressure"] <= 55:
+                "reason": f"Volume strongly favors sellers ({vol['sell_pressure']}% sell pressure). "
+                          f"Waiting for buyers to show up."}
+    if side == "SELL" and vol["sell_pressure"] < 48:
         return {"approved": False,
-                "reason": f"Volume does not confirm sellers ({vol['sell_pressure']}% sell pressure). "
-                          f"Waiting for volume to support the move."}
+                "reason": f"Volume strongly favors buyers ({vol['buy_pressure']}% buy pressure). "
+                          f"Waiting for sellers to show up."}
 
-    # 6. Candlestick confirmation
-    direction_needed = "Bullish" if side == "BUY" else "Bearish"
-    has_candle = any(p["direction"] == direction_needed for p in pat)
-    if not has_candle:
-        return {"approved": False,
-                "reason": f"No {direction_needed.lower()} confirmation candle detected. "
-                          f"Waiting for candle confirmation before entering."}
+    # 6. Candlestick confirmation — OPTIONAL (adds confidence but does not block)
+    # Candlestick patterns are rare on daily candles. They add confidence score
+    # but are not required to open a trade. The other 5 conditions are enough.
 
     # 7. Minimum Risk/Reward
     if rr < MIN_RISK_REWARD:
@@ -228,24 +224,24 @@ def check_all_rules(side: str, analysis: dict, confidence: int,
                 "reason": f"Risk/Reward is 1:{rr} — below minimum 1:{MIN_RISK_REWARD}. "
                           f"Not worth the risk. Skipping."}
 
-    # 8. Minimum confidence
+    # 8. Minimum confidence (60% — realistic with 5 indicators, no MACD)
     if confidence < MIN_CONFIDENCE:
         return {"approved": False,
                 "reason": f"Confidence is {confidence}% — below minimum {MIN_CONFIDENCE}%. "
-                          f"Setup not strong enough. Waiting."}
+                          f"Need stronger alignment across structure, EMA, RSI and volume."}
 
-    # 9. Multi-timeframe alignment check
+    # 9. Multi-timeframe alignment — at least 1 timeframe must agree
     frames   = analysis.get("frames", [])
     tf_buys  = sum(1 for f in frames if f["decision"] == "BUY")
     tf_sells = sum(1 for f in frames if f["decision"] == "SELL")
-    if side == "BUY" and tf_buys < 2:
+    if side == "BUY" and tf_buys < 1:
         return {"approved": False,
-                "reason": f"Only {tf_buys}/4 timeframes agree on BUY. "
-                          f"Need at least 2 timeframes aligned. Waiting."}
-    if side == "SELL" and tf_sells < 2:
+                "reason": f"No timeframe agrees on BUY ({tf_buys}/4). "
+                          f"Waiting for at least one timeframe to confirm."}
+    if side == "SELL" and tf_sells < 1:
         return {"approved": False,
-                "reason": f"Only {tf_sells}/4 timeframes agree on SELL. "
-                          f"Need at least 2 timeframes aligned. Waiting."}
+                "reason": f"No timeframe agrees on SELL ({tf_sells}/4). "
+                          f"Waiting for at least one timeframe to confirm."}
 
     return {"approved": True, "reason": "All conditions met. Executing trade."}
 
