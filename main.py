@@ -293,8 +293,8 @@ def _levels_html(levels):
     return out
 
 def _conf_breakdown(conf):
-    maxes = {"Market Structure":20,"EMA Alignment":15,"RSI":10,
-             "MACD":15,"Candlestick":20,"Volume":20}
+    maxes = {"Market Structure":25,"EMA Alignment":25,"RSI":15,
+             "Candlestick":20,"Volume":15}
     out = ""
     for k, v in conf["breakdown"].items():
         mx  = maxes.get(k, 20)
@@ -497,7 +497,7 @@ async def dashboard(symbol: str = "BTCUSD"):
 
     <div class="adv-card">
       <h4>Confidence Breakdown</h4>
-      <div class="explain">Minimum {MIN_CONFIDENCE}% required before Aria trades.</div>
+      <div class="explain">5 indicators · max 100 pts · min {MIN_CONFIDENCE}% to trade · MACD removed</div>
       {_conf_breakdown(decision['confidence'])}
     </div>
 
