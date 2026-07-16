@@ -64,7 +64,7 @@ MAX_OPEN_POSITIONS  = 1       # Only 1 open trade at a time
 #  If any condition is missing → WAIT.
 # ──────────────────────────────────────────────
 
-MIN_CONFIDENCE      = 75      # Minimum confidence score to trade (0–100)
+MIN_CONFIDENCE      = 60      # Minimum confidence score to trade (0–100)
 
 BUY_CONDITIONS = {
     "market_structure": "Bullish",   # HH / HL required
