@@ -27,71 +27,87 @@ client     = OpenAI(api_key=AI_API_KEY) if AI_API_KEY and AI_API_KEY.startswith(
 # ──────────────────────────────────────────────
 
 CONFIDENCE_MAX = {
-    "Market Structure": 20,
-    "EMA Alignment":    15,
-    "RSI":              10,
-    "MACD":             15,
+    "Market Structure": 25,
+    "EMA Alignment":    25,
+    "RSI":              15,
     "Candlestick":      20,
-    "Volume":           20,
+    "Volume":           15,
 }
 
 
 def compute_confidence(analysis: dict, decision: str) -> dict:
     """
-    Score each indicator based on how much it confirms the decision.
-    Total max = 100. WAIT always returns 0 (no confirmation needed).
+    Score the actual market conditions regardless of decision.
+    Shows real strength of the setup so the user can see what is happening.
+    For WAIT, we score the strongest possible direction (BUY or SELL)
+    so the breakdown always shows meaningful numbers.
     """
-    scores   = {k: 0 for k in CONFIDENCE_MAX}
-    is_buy   = decision == "BUY"
-    is_sell  = decision == "SELL"
-
-    if not (is_buy or is_sell):
-        return {"breakdown": scores, "total": 0}
+    scores = {k: 0 for k in CONFIDENCE_MAX}
 
     ms  = analysis["ms"]
     e20 = analysis["ema20"]
     e50 = analysis["ema50"]
     r   = analysis["rsi14"]
-    ml  = analysis["macd_line"]
-    mss = analysis["macd_signal"]
     pat = analysis["patterns"]
     vol = analysis["vol"]
 
-    # Market Structure (20 pts)
-    if (is_buy and ms["trend"] == "Bullish") or (is_sell and ms["trend"] == "Bearish"):
-        scores["Market Structure"] = 20
+    # Determine dominant direction from market data
+    if decision == "BUY":
+        direction = "BUY"
+    elif decision == "SELL":
+        direction = "SELL"
+    else:
+        # For WAIT: score whichever direction the structure leans
+        direction = "BUY" if ms["trend"] == "Bullish" else "SELL"
 
-    # EMA Alignment (15 pts)
-    if (is_buy and e20 > e50) or (is_sell and e20 < e50):
-        scores["EMA Alignment"] = 15
+    is_buy  = direction == "BUY"
+    is_sell = direction == "SELL"
 
-    # RSI (10 pts)
-    if   is_buy  and 40 < r < 65:  scores["RSI"] = 10
-    elif is_sell and 35 < r < 60:  scores["RSI"] = 10
-    elif is_buy  and r <= 40:      scores["RSI"] = 5   # oversold bounce
-    elif is_sell and r >= 65:      scores["RSI"] = 5   # overbought drop
+    # Market Structure (25 pts)
+    if ms["trend"] == "Bullish" and is_buy:
+        scores["Market Structure"] = 25
+    elif ms["trend"] == "Bearish" and is_sell:
+        scores["Market Structure"] = 25
+    elif ms["trend"] in ("Bullish", "Bearish"):
+        scores["Market Structure"] = 10   # structure exists but misaligned
 
-    # MACD (15 pts)
-    if (is_buy and ml > mss) or (is_sell and ml < mss):
-        scores["MACD"] = 15
+    # EMA Alignment (25 pts)
+    ema_bull = e20 > e50
+    ema_bear = e20 < e50
+    if (is_buy and ema_bull) or (is_sell and ema_bear):
+        scores["EMA Alignment"] = 25
+    elif (is_buy and ema_bear) or (is_sell and ema_bull):
+        scores["EMA Alignment"] = 0
 
-    # Candlestick (20 pts)
-    matching = [
-        p for p in pat if
-        (is_buy  and p["direction"] == "Bullish") or
-        (is_sell and p["direction"] == "Bearish")
-    ]
-    if matching:
-        scores["Candlestick"] = 20 if any(p["strength"] == "Strong" for p in matching) else 10
+    # RSI (15 pts) — reward momentum, penalise extremes against trade
+    if is_buy:
+        if 40 < r < 70:   scores["RSI"] = 15
+        elif r <= 40:      scores["RSI"] = 10   # oversold, good for BUY
+        elif 70 <= r < 80: scores["RSI"] = 5    # overbought, risky
+        else:              scores["RSI"] = 0
+    else:
+        if 30 < r < 60:   scores["RSI"] = 15
+        elif r >= 60:      scores["RSI"] = 10   # overbought, good for SELL
+        elif 20 < r <= 30: scores["RSI"] = 5    # oversold, risky
+        else:              scores["RSI"] = 0
 
-    # Volume (20 pts)
-    if vol["relative"] >= 1.2:
-        if (is_buy and vol["buy_pressure"] > 55) or (is_sell and vol["sell_pressure"] > 55):
-            scores["Volume"] = 20
-        else:
-            scores["Volume"] = 10
-    elif vol["relative"] >= 0.8:
-        scores["Volume"] = 5
+    # Candlestick (20 pts) — optional, adds to score but never blocks
+    bull_pat = [p for p in pat if p["direction"] == "Bullish"]
+    bear_pat = [p for p in pat if p["direction"] == "Bearish"]
+    if is_buy and bull_pat:
+        scores["Candlestick"] = 20 if any(p["strength"] == "Strong" for p in bull_pat) else 10
+    elif is_sell and bear_pat:
+        scores["Candlestick"] = 20 if any(p["strength"] == "Strong" for p in bear_pat) else 10
+    else:
+        scores["Candlestick"] = 0   # no pattern = 0 pts, but does NOT block trade
+
+    # Volume (15 pts)
+    if is_buy:
+        if vol["buy_pressure"] > 55:   scores["Volume"] = 15
+        elif vol["buy_pressure"] > 45: scores["Volume"] = 8
+    else:
+        if vol["sell_pressure"] > 55:  scores["Volume"] = 15
+        elif vol["sell_pressure"] > 45:scores["Volume"] = 8
 
     return {"breakdown": scores, "total": sum(scores.values())}
 
