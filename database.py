@@ -73,7 +73,7 @@ def setup_database():
                     take_profit  NUMERIC(12,2),
                     rr           NUMERIC(5,2),
                     be_moved     BOOLEAN      DEFAULT FALSE,
-                    trailing     BOOLEAN      DEFAULT FALSE,
+                    trail_sl     BOOLEAN      DEFAULT FALSE,
                     opened_at    TIMESTAMP    DEFAULT NOW(),
                     status       VARCHAR(10)  DEFAULT 'OPEN'
                 );
@@ -179,12 +179,12 @@ def save_position(position: dict):
             cur.execute("""
                 INSERT INTO positions
                     (trade_id, symbol, side, entry_price, size, risk_amount,
-                     stop_loss, take_profit, rr, be_moved, trailing, opened_at, status)
+                     stop_loss, take_profit, rr, be_moved, trail_sl, opened_at, status)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'OPEN')
                 ON CONFLICT (trade_id) DO UPDATE SET
                     stop_loss  = EXCLUDED.stop_loss,
                     be_moved   = EXCLUDED.be_moved,
-                    trailing   = EXCLUDED.trailing,
+                    trail_sl   = EXCLUDED.trail_sl,
                     status     = EXCLUDED.status
             """, (
                 position["trade_id"], position["symbol"], position["side"],
@@ -200,7 +200,7 @@ def load_position() -> dict | None:
     """Return the current open position, or None."""
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM positions WHERE status = 'OPEN' LIMIT 1")
+            cur.execute("SELECT * FROM positions WHERE status = 'OPEN' ORDER BY opened_at DESC LIMIT 1")
             row = cur.fetchone()
             if not row:
                 return None
@@ -213,6 +213,7 @@ def load_position() -> dict | None:
             p["take_profit"] = float(p["take_profit"])
             p["rr"]          = float(p["rr"])
             p["opened_at"]   = p["opened_at"].isoformat() if p["opened_at"] else ""
+            p["trailing"]    = p.get("trail_sl", False)  # normalize for rest of system
             return p
 
 
@@ -225,6 +226,35 @@ def close_position_in_db(trade_id: str):
                 (trade_id,)
             )
         conn.commit()
+
+
+def get_open_positions() -> list:
+    """Return all currently open positions."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM positions WHERE status = 'OPEN' ORDER BY opened_at ASC")
+            rows = cur.fetchall()
+            result = []
+            for row in rows:
+                p = dict(row)
+                p["entry_price"] = float(p["entry_price"])
+                p["size"]        = float(p["size"])
+                p["risk_amount"] = float(p["risk_amount"])
+                p["stop_loss"]   = float(p["stop_loss"])
+                p["take_profit"] = float(p["take_profit"])
+                p["rr"]          = float(p["rr"])
+                p["opened_at"]   = p["opened_at"].isoformat() if p["opened_at"] else ""
+                p["trailing"]    = p.get("trail_sl", False)
+                result.append(p)
+            return result
+
+
+def get_open_positions_count() -> int:
+    """Return number of currently open positions."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM positions WHERE status = 'OPEN'")
+            return cur.fetchone()[0]
 
 
 def clear_position():
