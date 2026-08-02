@@ -30,6 +30,7 @@ from datetime import datetime
 import os
 
 # ── Module imports ──
+from database        import setup_database, get_account, load_balance as db_load_balance
 from scanner         import scan, fetch_current_price
 from analyzer        import analyze
 from decision_engine import decide
@@ -56,6 +57,7 @@ from config          import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_database()       # ← create tables if first run
     start_auto_trading()   # ← Aria starts trading itself here
     yield
     stop_auto_trading()
@@ -368,7 +370,8 @@ async def dashboard(symbol: str = "BTCUSD"):
 
     analysis = analyze(scan_data)
     decision = decide(analysis)
-    balance  = load_balance()
+    account  = get_account()
+    balance  = float(account['balance'])
     position = load_position()
     price    = scan_data["price"]
     dec      = decision["decision"]
@@ -397,7 +400,7 @@ async def dashboard(symbol: str = "BTCUSD"):
             f"<span style='color:#444;font-size:11px'>#{position.get('trade_id','')}</span></div>"
             f"<div style='margin-top:5px;font-size:12px;color:#555'>"
             f"Entry ${entry:,.2f} · SL ${position['stop_loss']:,.2f} · TP ${position['take_profit']:,.2f}</div>"
-            f"<div style='color:{pl_c};font-size:18px;font-weight:bold;margin-top:6px'>"
+            f"<div id='live-pl' style='color:{pl_c};font-size:18px;font-weight:bold;margin-top:6px'>"
             f"P/L: ${pl:,.2f}</div>"
             f"<a href='/close?symbol={symbol}' class='btn btn-close' "
             f"style='display:inline-block;margin-top:8px'>Close Position</a></div>"
@@ -560,6 +563,7 @@ async def dashboard(symbol: str = "BTCUSD"):
       <div class="stat"><div class="v">1:{levels['rr']}</div><div class="l">R/R</div></div>
       <div class="stat"><div class="v">${risk_usd:.2f}</div><div class="l">Risk (1%)</div></div>
       <div class="stat"><div class="v">${balance:,.2f}</div><div class="l">Balance</div></div>
+      <div class="stat"><div class="v" id="live-equity" style="color:{'#2ecc71' if account['equity']>=balance else '#e74c3c'}">${account['equity']:,.2f}</div><div class="l">Equity</div></div>
     </div>
   </div>
 
@@ -594,6 +598,24 @@ async def dashboard(symbol: str = "BTCUSD"):
 
 </div>
 </div>
+<script>
+function updateEquity() {{
+  fetch('/api/equity').then(r=>r.json()).then(data=>{{
+    var eq = document.getElementById('live-equity');
+    var pl = document.getElementById('live-pl');
+    if(eq) {{
+      eq.textContent = '$' + data.equity.toLocaleString('en-US',{{minimumFractionDigits:2,maximumFractionDigits:2}});
+      eq.style.color = data.equity >= data.balance ? '#2ecc71' : '#e74c3c';
+    }}
+    if(pl && data.has_position) {{
+      pl.textContent = 'P/L: $' + data.floating_pl.toFixed(2);
+      pl.style.color = data.floating_pl >= 0 ? '#2ecc71' : '#e74c3c';
+    }}
+  }}).catch(function(){{}});
+}}
+setInterval(updateEquity, 5000);
+updateEquity();
+</script>
 </body></html>"""
     return HTMLResponse(html)
 
@@ -833,6 +855,29 @@ async def api_analyze(symbol: str = "BTCUSD"):
         "levels":     decision["levels"],
         "session":    scan_data["session"],
         "auto_status":get_auto_status(),
+    }
+
+@app.get("/api/equity")
+async def api_equity():
+    """Called every 5 seconds by the frontend to update equity live."""
+    account  = get_account()
+    position = load_position()
+    pl = 0.0
+    price = 0.0
+    if position:
+        from scanner import fetch_current_price
+        price = fetch_current_price(position["symbol"])
+        entry = position["entry_price"]
+        size  = position["size"]
+        side  = position["side"]
+        pl    = (price-entry)*size if side=="BUY" else (entry-price)*size
+        pl    = round(pl, 2)
+    return {
+        "balance":    float(account["balance"]),
+        "equity":     float(account["equity"]),
+        "floating_pl":pl,
+        "current_price": price,
+        "has_position": position is not None,
     }
 
 @app.get("/health")
