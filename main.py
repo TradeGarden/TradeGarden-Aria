@@ -30,7 +30,8 @@ from datetime import datetime
 import os
 
 # ── Module imports ──
-from database        import setup_database, get_account, load_balance as db_load_balance
+from database        import (setup_database, get_account, load_balance as db_load_balance,
+                              get_open_positions, get_open_positions_count)
 from scanner         import scan, fetch_current_price
 from analyzer        import analyze
 from decision_engine import decide
@@ -370,9 +371,10 @@ async def dashboard(symbol: str = "BTCUSD"):
 
     analysis = analyze(scan_data)
     decision = decide(analysis)
-    account  = get_account()
-    balance  = float(account['balance'])
-    position = load_position()
+    account        = get_account()
+    balance        = float(account['balance'])
+    open_positions = get_open_positions()
+    position       = open_positions[0] if open_positions else None
     price    = scan_data["price"]
     dec      = decision["decision"]
     conf     = decision["confidence"]["total"]
@@ -384,26 +386,28 @@ async def dashboard(symbol: str = "BTCUSD"):
     today_loss   = todays_loss_pct(balance)
     risk_usd     = round(balance * RISK_PER_TRADE_PCT / 100, 2)
 
-    # ── Open position block ──
+    # ── Open positions block (up to 2) ──
     pos_block = ""
-    if position and position.get("symbol") == symbol:
-        entry = position["entry_price"]
-        size  = position["size"]
-        side  = position["side"]
-        pl    = (price-entry)*size if side=="BUY" else (entry-price)*size
-        pl    = round(pl, 2)
-        pl_c  = "#2ecc71" if pl >= 0 else "#e74c3c"
-        pos_block = (
-            f"<div class='pos-card pos-{side.lower()}'>"
+    for pos in open_positions:
+        p_entry = pos["entry_price"]
+        p_size  = pos["size"]
+        p_side  = pos["side"]
+        p_sym   = pos["symbol"]
+        p_pl    = (price-p_entry)*p_size if p_side=="BUY" else (p_entry-price)*p_size
+        p_pl    = round(p_pl, 2)
+        p_col   = "#2ecc71" if p_pl >= 0 else "#e74c3c"
+        tid     = pos.get("trade_id","")
+        pos_block += (
+            f"<div class='pos-card pos-{p_side.lower()}'>"
             f"<div style='display:flex;justify-content:space-between;align-items:center'>"
-            f"<span style='font-weight:bold;color:#fff'>{side} {size} {symbol[:3]}</span>"
-            f"<span style='color:#444;font-size:11px'>#{position.get('trade_id','')}</span></div>"
+            f"<span style='font-weight:bold;color:#fff'>{p_side} {p_size} {p_sym[:3]}</span>"
+            f"<span style='color:#444;font-size:11px'>#{tid}</span></div>"
             f"<div style='margin-top:5px;font-size:12px;color:#555'>"
-            f"Entry ${entry:,.2f} · SL ${position['stop_loss']:,.2f} · TP ${position['take_profit']:,.2f}</div>"
-            f"<div id='live-pl' style='color:{pl_c};font-size:18px;font-weight:bold;margin-top:6px'>"
-            f"P/L: ${pl:,.2f}</div>"
-            f"<a href='/close?symbol={symbol}' class='btn btn-close' "
-            f"style='display:inline-block;margin-top:8px'>Close Position</a></div>"
+            f"Entry ${p_entry:,.2f} · SL ${pos['stop_loss']:,.2f} · TP ${pos['take_profit']:,.2f}</div>"
+            f"<div id='live-pl-{tid}' style='color:{p_col};font-size:18px;font-weight:bold;margin-top:6px'>"
+            f"P/L: ${p_pl:,.2f}</div>"
+            f"<a href='/close?symbol={p_sym}&trade_id={tid}' class='btn btn-close' "
+            f"style='display:inline-block;margin-top:8px'>Close #{tid[:6]}</a></div>"
         )
 
     html = f"""<!DOCTYPE html>
@@ -579,6 +583,12 @@ async def dashboard(symbol: str = "BTCUSD"):
           {today_loss:.1f}% / {DAILY_LOSS_LIMIT_PCT}%
         </div>
         <div class="l">Loss Limit</div>
+      </div>
+      <div class="stat">
+        <div class="v" style="color:{'#2ecc71' if len(open_positions)>0 else '#444'}">
+          {len(open_positions)} / 2
+        </div>
+        <div class="l">Open Trades</div>
       </div>
     </div>
   </div>
@@ -807,14 +817,20 @@ async def execute_route(symbol: str = Query(...), side: str = Query(...)):
 
 
 @app.get("/close")
-async def close_route(symbol: str = "BTCUSD"):
-    position = load_position()
-    if not position:
+async def close_route(symbol: str = "BTCUSD", trade_id: str = ""):
+    from database import get_open_positions
+    positions = get_open_positions()
+    if not positions:
         return HTMLResponse(
             "<html><body style='background:#090909;color:#d0d0d0;padding:30px'>"
             "<h2>No open position</h2>"
             "<a href='/' style='color:#444'>Back</a></body></html>"
         )
+    # Close specific trade if trade_id given, else close first
+    if trade_id:
+        position = next((p for p in positions if p.get("trade_id","") == trade_id), positions[0])
+    else:
+        position = positions[0]
     price  = fetch_current_price(position["symbol"])
     result = close_trade(position, price, "Manual close")
     color  = "#2ecc71" if result["pl"] >= 0 else "#e74c3c"
