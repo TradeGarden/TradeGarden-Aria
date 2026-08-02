@@ -80,8 +80,11 @@ def check_all_rules(side: str, analysis: dict, confidence: int, rr: float, balan
     vol  = analysis["vol"]
     cond = BUY_CONDITIONS if side == "BUY" else SELL_CONDITIONS
 
-    if load_position():
-        return {"approved": False, "reason": "Already have an open position. Max 1 at a time."}
+    from database import get_open_positions_count
+    from config import MAX_OPEN_POSITIONS
+    open_count = get_open_positions_count()
+    if open_count >= MAX_OPEN_POSITIONS:
+        return {"approved": False, "reason": f"Max {MAX_OPEN_POSITIONS} open positions reached ({open_count} open). Waiting for one to close."}
 
     if todays_trade_count() >= MAX_TRADES_PER_DAY:
         return {"approved": False, "reason": f"Daily trade limit reached ({MAX_TRADES_PER_DAY}). Done for today."}
@@ -167,7 +170,7 @@ def open_trade(symbol: str, side: str, analysis: dict, decision: dict) -> dict:
         "opened_at":   datetime.utcnow().isoformat(),
         "status":      "OPEN",
         "be_moved":    False,
-        "trailing":    False,
+        "trail_sl":    False,
     }
 
     save_position(position)   # → PostgreSQL
@@ -369,12 +372,20 @@ def _auto_loop():
                 )
                 _log(f"{symbol} — {dec} | Conf {conf}%")
 
-                # Check existing position
-                position = load_position()
-                if position and position.get("symbol") == symbol:
+                # Check all open positions for this symbol
+                from database import get_open_positions
+                open_positions = get_open_positions()
+                sym_positions  = [p for p in open_positions if p.get("symbol") == symbol]
+
+                for pos in sym_positions:
                     price = fetch_current_price(symbol)
-                    _check_position_sl_tp(position, price, analysis["atr14"])
-                    continue   # Don't open new trade if one is open
+                    _check_position_sl_tp(pos, price, analysis["atr14"])
+
+                # Still allow new trade if under MAX_OPEN_POSITIONS
+                from config import MAX_OPEN_POSITIONS
+                if len(open_positions) >= MAX_OPEN_POSITIONS:
+                    _log(f"{symbol} — {len(open_positions)} positions open. Waiting.")
+                    continue
 
                 if dec == "WAIT":
                     continue
