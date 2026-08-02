@@ -56,7 +56,7 @@ TP_ATR_MULTIPLIER   = 3.0     # Take profit = entry ± (ATR × 3.0)
 MIN_TRADES_PER_DAY  = 0       # Aria is fine taking 0 trades
 TARGET_TRADES_PER_DAY = 2     # Ideal range
 MAX_TRADES_PER_DAY  = 6       # Hard limit — stop after this
-MAX_OPEN_POSITIONS  = 1       # Only 1 open trade at a time
+MAX_OPEN_POSITIONS  = 2       # Max 2 open trades at a time
 
 # ──────────────────────────────────────────────
 #  DECISION RULES
