@@ -1,5 +1,5 @@
 """
-recommendations.py — Stage 8
+recommendations.py - Stage 8
 """
 from database import load_closed_trades
 from config import MIN_TRADES_FOR_RECS
