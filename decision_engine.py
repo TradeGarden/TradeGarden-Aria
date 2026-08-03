@@ -1,5 +1,5 @@
 """
-decision_engine.py — Stage 3: DECIDE
+decision_engine.py - Stage 3: DECIDE
 ======================================
 This is Aria's brain.
 
@@ -79,7 +79,7 @@ def compute_confidence(analysis: dict, decision: str) -> dict:
     elif (is_buy and ema_bear) or (is_sell and ema_bull):
         scores["EMA Alignment"] = 0
 
-    # RSI (15 pts) — reward momentum, penalise extremes against trade
+    # RSI (15 pts) - reward momentum, penalise extremes against trade
     if is_buy:
         if 40 < r < 70:   scores["RSI"] = 15
         elif r <= 40:      scores["RSI"] = 10   # oversold, good for BUY
@@ -91,7 +91,7 @@ def compute_confidence(analysis: dict, decision: str) -> dict:
         elif 20 < r <= 30: scores["RSI"] = 5    # oversold, risky
         else:              scores["RSI"] = 0
 
-    # Candlestick (20 pts) — optional, adds to score but never blocks
+    # Candlestick (20 pts) - optional, adds to score but never blocks
     bull_pat = [p for p in pat if p["direction"] == "Bullish"]
     bear_pat = [p for p in pat if p["direction"] == "Bearish"]
     if is_buy and bull_pat:
@@ -178,9 +178,9 @@ def build_reasons(analysis: dict, decision: str) -> list:
 
     # EMA
     if e20 > e50:
-        reasons.append(f"EMA20 (${e20:,.0f}) is above EMA50 (${e50:,.0f}) — bullish trend")
+        reasons.append(f"EMA20 (${e20:,.0f}) is above EMA50 (${e50:,.0f}) - bullish trend")
     elif e20 < e50:
-        reasons.append(f"EMA20 (${e20:,.0f}) is below EMA50 (${e50:,.0f}) — bearish trend")
+        reasons.append(f"EMA20 (${e20:,.0f}) is below EMA50 (${e50:,.0f}) - bearish trend")
 
     # Market structure
     if ms["trend"] == "Bullish":
@@ -188,15 +188,15 @@ def build_reasons(analysis: dict, decision: str) -> list:
     elif ms["trend"] == "Bearish":
         reasons.append(f"Bearish market structure ({ms['sequence']})")
     else:
-        reasons.append(f"Neutral structure ({ms['sequence']}) — no clear trend")
+        reasons.append(f"Neutral structure ({ms['sequence']}) - no clear trend")
 
     # RSI
     if rl == "Overbought":
-        reasons.append(f"RSI overbought ({r}) — momentum weakening")
+        reasons.append(f"RSI overbought ({r}) - momentum weakening")
     elif rl == "Oversold":
-        reasons.append(f"RSI oversold ({r}) — potential reversal zone")
+        reasons.append(f"RSI oversold ({r}) - potential reversal zone")
     else:
-        reasons.append(f"RSI neutral ({r}) — no extreme momentum")
+        reasons.append(f"RSI neutral ({r}) - no extreme momentum")
 
     # Volume
     if vol["sell_pressure"] > 55:
@@ -204,32 +204,32 @@ def build_reasons(analysis: dict, decision: str) -> list:
     elif vol["buy_pressure"] > 55:
         reasons.append(f"Volume favors buyers ({vol['buy_pressure']}% buying pressure)")
     else:
-        reasons.append("Volume is balanced — no strong conviction")
+        reasons.append("Volume is balanced - no strong conviction")
 
     # Candlestick
     bear_p = [p for p in pat if p["direction"] == "Bearish"]
     bull_p = [p for p in pat if p["direction"] == "Bullish"]
     if bear_p:
-        reasons.append(f"{bear_p[0]['name']} detected — bearish signal ({bear_p[0]['reliability']} reliability)")
+        reasons.append(f"{bear_p[0]['name']} detected - bearish signal ({bear_p[0]['reliability']} reliability)")
     elif bull_p:
-        reasons.append(f"{bull_p[0]['name']} detected — bullish signal ({bull_p[0]['reliability']} reliability)")
+        reasons.append(f"{bull_p[0]['name']} detected - bullish signal ({bull_p[0]['reliability']} reliability)")
     else:
         reasons.append("No significant candlestick pattern detected")
 
     # BOS / CHoCH
     if ms["bos"]:
-        reasons.append("Break of Structure (BOS) confirmed — continuation signal")
+        reasons.append("Break of Structure (BOS) confirmed - continuation signal")
     if ms["choch"]:
-        reasons.append("Change of Character (CHoCH) — possible trend shift")
+        reasons.append("Change of Character (CHoCH) - possible trend shift")
 
     # Liquidity sweep
     if liq["sweep"]:
         sw = liq["sweep"]
-        reasons.append(f"Liquidity sweep {sw['direction']} — {sw['signal']}")
+        reasons.append(f"Liquidity sweep {sw['direction']} - {sw['signal']}")
 
     # WAIT explanation
     if decision == "WAIT":
-        reasons.append("Conditions not fully aligned — no trade taken. Waiting for confirmation.")
+        reasons.append("Conditions not fully aligned - no trade taken. Waiting for confirmation.")
 
     return reasons
 
@@ -257,11 +257,11 @@ def get_narrative(analysis: dict, decision: str, confidence: int, levels: dict) 
     fallback = (
         f"SIGNAL: {decision}\n\n"
         f"REASON:\n"
-        f"• {ms['trend']} {ms['structure']} structure ({ms['sequence']}) — "
+        f"• {ms['trend']} {ms['structure']} structure ({ms['sequence']}) - "
         f"{ms['strength_label']} at {ms['strength_pct']}%\n"
-        f"• EMA20 {'above' if analysis['ema20'] > analysis['ema50'] else 'below'} EMA50 — "
+        f"• EMA20 {'above' if analysis['ema20'] > analysis['ema50'] else 'below'} EMA50 - "
         f"{'bullish' if analysis['ema20'] > analysis['ema50'] else 'bearish'} trend\n"
-        f"• RSI {analysis['rsi14']} — {analysis['rsi_label'].lower()}\n"
+        f"• RSI {analysis['rsi14']} - {analysis['rsi_label'].lower()}\n"
         f"• Volume: {vol['buy_pressure']}% buyers / {vol['sell_pressure']}% sellers ({vol['label']})\n"
         f"• Patterns: {pat_str}\n\n"
         f"RISK: Moderate\n\n"
@@ -276,7 +276,7 @@ def get_narrative(analysis: dict, decision: str, confidence: int, levels: dict) 
 
     try:
         prompt = f"""You are Aria, a professional crypto trading AI. Write a concise structured analysis.
-Explain what the indicators mean together — do not just list numbers.
+Explain what the indicators mean together - do not just list numbers.
 
 Symbol: {symbol} | Price: ${price:,.2f} | Session: {session}
 Decision: {decision} | Confidence: {confidence}%
@@ -284,7 +284,7 @@ Structure: {ms['structure']} ({ms['sequence']}) | Trend: {ms['trend']} | Strengt
 EMA20: ${analysis['ema20']:,.2f} | EMA50: ${analysis['ema50']:,.2f}
 RSI: {analysis['rsi14']} ({analysis['rsi_label']})
 MACD: {analysis['macd_line']:+.2f} vs signal {analysis['macd_signal']:+.2f}
-Volume: buy {vol['buy_pressure']}% / sell {vol['sell_pressure']}% (relative x{vol['relative']}) — {vol['label']}
+Volume: buy {vol['buy_pressure']}% / sell {vol['sell_pressure']}% (relative x{vol['relative']}) - {vol['label']}
 Patterns: {pat_str}
 SL: ${levels['stop_loss']:,.2f} | TP: ${levels['take_profit']:,.2f} | R:R 1:{levels['rr']}
 
@@ -298,7 +298,7 @@ REASON:
 • [volume insight]
 • [candlestick insight]
 
-RISK: [Low/Moderate/High] — [one sentence why]
+RISK: [Low/Moderate/High] - [one sentence why]
 
 CONCLUSION: [2–3 sentences on the full market picture and what to watch]
 
@@ -322,7 +322,7 @@ Max 180 words. Be direct and specific."""
 
 def decide(analysis: dict) -> dict:
     """
-    Stage 3 — DECIDE.
+    Stage 3 - DECIDE.
     Takes the full analysis and returns one decision with all context.
     """
     if "error" in analysis:
