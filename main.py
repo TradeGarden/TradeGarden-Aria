@@ -1,8 +1,8 @@
 """
-main.py — Aria AI Trading Engine
+main.py - Aria AI Trading Engine
 ==================================
 Starts the FastAPI server and connects all modules.
-Contains ZERO trading logic — that lives in the modules below.
+Contains ZERO trading logic - that lives in the modules below.
 
 On startup:
   - Auto-trading loop begins immediately (executor.start_auto_trading)
@@ -11,14 +11,14 @@ On startup:
   - trade_manager.py runs as a separate Render background worker
 
 Module map:
-  scanner.py          Stage 1 — Fetch market data
-  analyzer.py         Stage 2 — Calculate all indicators
-  decision_engine.py  Stage 3 — Make one decision: BUY / SELL / WAIT
-  executor.py         Stage 4 — Auto-trade with full rule enforcement
-  trade_manager.py    Stage 5 — Background position monitoring
-  journal.py          Stage 6 — Permanent trade storage
-  reports.py          Stage 7 — Daily/weekly/monthly performance reports
-  recommendations.py  Stage 8 — Self-analysis and improvement suggestions
+  scanner.py          Stage 1 - Fetch market data
+  analyzer.py         Stage 2 - Calculate all indicators
+  decision_engine.py  Stage 3 - Make one decision: BUY / SELL / WAIT
+  executor.py         Stage 4 - Auto-trade with full rule enforcement
+  trade_manager.py    Stage 5 - Background position monitoring
+  journal.py          Stage 6 - Permanent trade storage
+  reports.py          Stage 7 - Daily/weekly/monthly performance reports
+  recommendations.py  Stage 8 - Self-analysis and improvement suggestions
   config.py           All system settings
 """
 
@@ -53,7 +53,7 @@ from config          import (
 
 
 # ══════════════════════════════════════════════
-#  STARTUP — begin auto-trading when server launches
+#  STARTUP - begin auto-trading when server launches
 # ══════════════════════════════════════════════
 
 @asynccontextmanager
@@ -264,15 +264,15 @@ def _liq_html(liq):
            f"<span style='color:#444;font-size:12px;margin-left:8px'>${liq['sell_side_level']:,.2f}</span></div>")
     if liq["equal_highs"]:
         out += (f"<div style='padding:5px 0;color:#f39c12;font-size:12px'>"
-                f"Equal Highs @ ${liq['equal_highs_level']:,.2f} — BSL above</div>")
+                f"Equal Highs @ ${liq['equal_highs_level']:,.2f} - BSL above</div>")
     if liq["equal_lows"]:
         out += (f"<div style='padding:5px 0;color:#f39c12;font-size:12px'>"
-                f"Equal Lows @ ${liq['equal_lows_level']:,.2f} — SSL below</div>")
+                f"Equal Lows @ ${liq['equal_lows_level']:,.2f} - SSL below</div>")
     if liq["sweep"]:
         sw = liq["sweep"]
         out += (f"<div style='padding:8px;margin-top:6px;background:#1a1200;"
                 f"border-radius:6px;border:1px solid #f39c12;font-size:12px'>"
-                f"<b style='color:#f39c12'>⚠️ Sweep</b> — {sw['direction']} · {sw['signal']}</div>")
+                f"<b style='color:#f39c12'>⚠️ Sweep</b> - {sw['direction']} · {sw['signal']}</div>")
     return out
 
 def _levels_html(levels):
@@ -415,7 +415,7 @@ async def dashboard(symbol: str = "BTCUSD"):
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="{DASHBOARD_REFRESH_SECONDS}">
-<title>Aria — {symbol}</title>
+<title>Aria - {symbol}</title>
 {base_css()}
 </head><body>
 {_topbar(symbol)}
@@ -442,8 +442,8 @@ async def dashboard(symbol: str = "BTCUSD"):
         <div class="stat"><div class="v">${analysis['ms']['swing_high']:,.0f}</div><div class="l">Swing High</div></div>
         <div class="stat"><div class="v">${analysis['ms']['swing_low']:,.0f}</div><div class="l">Swing Low</div></div>
       </div>
-      {"<div style='margin-top:8px;padding:7px;background:#0d2e1a;border-radius:6px;color:#2ecc71;font-size:12px'>✅ BOS — Break of Structure confirmed</div>" if analysis['ms']['bos'] else ""}
-      {"<div style='margin-top:8px;padding:7px;background:#2e1a0d;border-radius:6px;color:#f39c12;font-size:12px'>⚠️ CHoCH — Change of Character detected</div>" if analysis['ms']['choch'] else ""}
+      {"<div style='margin-top:8px;padding:7px;background:#0d2e1a;border-radius:6px;color:#2ecc71;font-size:12px'>✅ BOS - Break of Structure confirmed</div>" if analysis['ms']['bos'] else ""}
+      {"<div style='margin-top:8px;padding:7px;background:#2e1a0d;border-radius:6px;color:#f39c12;font-size:12px'>⚠️ CHoCH - Change of Character detected</div>" if analysis['ms']['choch'] else ""}
     </div>
 
     <div class="adv-card">
@@ -657,9 +657,9 @@ async def reports_page():
             f"<title>Aria · Reports</title>{base_css()}</head><body>"
             f"{_topbar('', 'weekly')}"
             f"<div style='max-width:960px;margin:24px auto;padding:0 20px'>"
-            f"<div class='card'><div class='card-title'>Daily — Last 24 Hours</div>{_report_block(d)}</div>"
-            f"<div class='card'><div class='card-title'>Weekly — Last 7 Days</div>{_report_block(w)}</div>"
-            f"<div class='card'><div class='card-title'>Monthly — Last 30 Days</div>{_report_block(m)}</div>"
+            f"<div class='card'><div class='card-title'>Daily - Last 24 Hours</div>{_report_block(d)}</div>"
+            f"<div class='card'><div class='card-title'>Weekly - Last 7 Days</div>{_report_block(w)}</div>"
+            f"<div class='card'><div class='card-title'>Monthly - Last 30 Days</div>{_report_block(m)}</div>"
             f"</div></body></html>")
     return HTMLResponse(html)
 
@@ -754,10 +754,10 @@ async def rules_page():
             f"{_topbar('', 'rules')}"
             f"<div style='max-width:960px;margin:24px auto;padding:0 20px'>"
             f"<div class='card'>"
-            f"<div class='card-title'>Current Trading Rules — config.py</div>"
+            f"<div class='card-title'>Current Trading Rules - config.py</div>"
             f"<div style='font-size:12px;color:#333;margin-bottom:12px'>"
             f"These rules are enforced on every trade. Aria never breaks them. "
-            f"Change them in config.py — Aria applies them automatically.</div>"
+            f"Change them in config.py - Aria applies them automatically.</div>"
             f"<div class='rules-grid'>"
             f"<div class='rule-box'><h5>Risk Management</h5>"
             f"<div class='rule-row'><span>Risk per trade</span><span style='color:#fff'>{RISK_PER_TRADE_PCT}%</span></div>"
@@ -769,14 +769,14 @@ async def rules_page():
             f"<div class='rule-row'><span>Target trades/day</span><span style='color:#fff'>2–4</span></div>"
             f"<div class='rule-row'><span>Max trades/day</span><span style='color:#fff'>{MAX_TRADES_PER_DAY}</span></div>"
             f"<div class='rule-row'><span>Min confidence</span><span style='color:#fff'>{MIN_CONFIDENCE}%</span></div></div>"
-            f"<div class='rule-box'><h5>BUY — All required</h5>"
+            f"<div class='rule-box'><h5>BUY - All required</h5>"
             f"<div class='rule-row'><span>Structure</span><span style='color:#2ecc71'>HH / HL</span></div>"
             f"<div class='rule-row'><span>EMA</span><span style='color:#2ecc71'>EMA20 above EMA50</span></div>"
             f"<div class='rule-row'><span>Volume</span><span style='color:#2ecc71'>Buyers confirmed</span></div>"
             f"<div class='rule-row'><span>Candle</span><span style='color:#2ecc71'>Bullish pattern</span></div>"
             f"<div class='rule-row'><span>RSI</span><span style='color:#2ecc71'>Below 75</span></div>"
             f"<div class='rule-row'><span>Timeframes</span><span style='color:#2ecc71'>2+ aligned</span></div></div>"
-            f"<div class='rule-box'><h5>SELL — All required</h5>"
+            f"<div class='rule-box'><h5>SELL - All required</h5>"
             f"<div class='rule-row'><span>Structure</span><span style='color:#e74c3c'>LH / LL</span></div>"
             f"<div class='rule-row'><span>EMA</span><span style='color:#e74c3c'>EMA20 below EMA50</span></div>"
             f"<div class='rule-row'><span>Volume</span><span style='color:#e74c3c'>Sellers confirmed</span></div>"
@@ -815,7 +815,7 @@ async def execute_route(symbol: str = Query(...), side: str = Query(...)):
         color = "#2ecc71" if side == "BUY" else "#e74c3c"
         return HTMLResponse(
             f"<html><body style='background:#090909;color:#d0d0d0;font-family:Arial;padding:30px'>"
-            f"<h2 style='color:{color}'>✅ Trade Executed — #{pos['trade_id']}</h2>"
+            f"<h2 style='color:{color}'>✅ Trade Executed - #{pos['trade_id']}</h2>"
             f"<p style='margin-top:10px'>{side} {pos['size']} {symbol} @ ${pos['entry_price']:,.2f}</p>"
             f"<p style='color:#444;margin-top:4px'>"
             f"SL ${pos['stop_loss']:,.2f} · TP ${pos['take_profit']:,.2f} · Risk ${pos['risk_amount']:.2f}</p>"
@@ -891,7 +891,7 @@ async def api_analyze(symbol: str = "BTCUSD"):
 
 @app.get("/api/equity")
 async def api_equity():
-    """Called every 5 seconds by frontend — sums ALL open positions for equity."""
+    """Called every 5 seconds by frontend - sums ALL open positions for equity."""
     from database import recalc_equity
     account   = get_account()
     positions = get_open_positions()
