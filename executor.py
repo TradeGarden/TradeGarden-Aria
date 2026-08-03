@@ -1,15 +1,15 @@
 """
-executor.py — Stage 4: EXECUTE
+executor.py - Stage 4: EXECUTE
 ================================
 Trading rules:
   - Max 3 open positions at once (BTC + ETH + scale-in on same symbol)
   - Max 6 trades per day total
-  - Daily loss limit 3% — stops all trading for the day
+  - Daily loss limit 3% - stops all trading for the day
   - 1 position per symbol UNLESS scaling in:
       First entry:  confidence 60-70% → 20% of risk
       Scale-in:     confidence rises to 70-85% → add 30% more
       Final scale:  confidence above 85% → add remaining 50%
-  - WAIT is never logged to journal — only trades and closes
+  - WAIT is never logged to journal - only trades and closes
   - Equity recalculated from ALL open positions every 5 seconds
   - SL/TP auto-closes save permanently to PostgreSQL
 """
@@ -126,19 +126,19 @@ def check_all_rules(symbol: str, side: str, analysis: dict,
         return {"approved": False,
                 "reason": f"Daily loss limit {DAILY_LOSS_LIMIT_PCT}% hit. Paused."}
 
-    # Scale-in check: if same symbol + same side already open, allow if confidence is higher
+    # Scale-in: allow up to 2 positions per symbol (initial + 1 scale-in)
+    # Each scale-in needs higher confidence than the minimum
     open_positions = get_open_positions()
     sym_positions  = [p for p in open_positions
                      if p["symbol"] == symbol and p["side"] == side]
-    if sym_positions:
-        existing_count = len(sym_positions)
-        if existing_count >= 2:
+    if len(sym_positions) >= 2:
+        return {"approved": False,
+                "reason": f"Already have 2 {symbol} {side} positions. Max per symbol reached."}
+    if len(sym_positions) == 1:
+        # Scale-in: only if confidence is solid (70%+)
+        if confidence < 70:
             return {"approved": False,
-                    "reason": f"Already scaled into {symbol} twice. Max scale-in reached."}
-        # Allow scale-in only if confidence is meaningfully higher (65%+)
-        if confidence < 65:
-            return {"approved": False,
-                    "reason": f"Scale-in requires confidence 65%+. Currently {confidence}%."}
+                    "reason": f"Scale-in requires 70%+ confidence. Currently {confidence}%."}
 
     # Market structure
     if ms["trend"] != cond["market_structure"]:
@@ -166,7 +166,7 @@ def check_all_rules(symbol: str, side: str, analysis: dict,
     if side == "SELL" and r < 25:
         return {"approved": False, "reason": f"RSI oversold ({r}). Skip."}
 
-    # Volume (only block if strongly against — 45% threshold)
+    # Volume (only block if strongly against - 45% threshold)
     if side == "BUY"  and vol["buy_pressure"]  < 45:
         return {"approved": False,
                 "reason": f"Volume favors sellers ({vol['sell_pressure']}%). Skip."}
@@ -262,7 +262,7 @@ def open_trade(symbol: str, side: str, analysis: dict, decision: dict) -> dict:
         "opened_at":   datetime.utcnow().isoformat(),
     })
 
-    _log(f"✅ {entry_type} #{trade_id} — {side} {pos_calc['size']} {symbol} "
+    _log(f"✅ {entry_type} #{trade_id} - {side} {pos_calc['size']} {symbol} "
          f"@ ${price:,.2f} | {pos_calc['size_label']} | Conf {confidence}%")
     return {"success": True, "position": position}
 
@@ -333,13 +333,13 @@ def close_trade(position: dict, current_price: float, reason: str = "Manual") ->
     })
 
     emoji = "🟢" if pl >= 0 else "🔴"
-    _log(f"{emoji} CLOSED #{position.get('trade_id', '')} — "
+    _log(f"{emoji} CLOSED #{position.get('trade_id', '')} - "
          f"P/L ${pl:,.2f} | Balance ${new_balance:,.2f} | {reason}")
     return {"pl": pl, "new_balance": new_balance, "duration": duration}
 
 
 # ══════════════════════════════════════════════
-#  POSITION CHECK — SL / TP / Break-Even
+#  POSITION CHECK - SL / TP / Break-Even
 # ══════════════════════════════════════════════
 
 def check_position(position: dict, current_price: float, atr: float) -> bool:
@@ -386,7 +386,7 @@ def check_position(position: dict, current_price: float, atr: float) -> bool:
 
 
 # ══════════════════════════════════════════════
-#  EQUITY UPDATER — every 5 seconds
+#  EQUITY UPDATER - every 5 seconds
 # ══════════════════════════════════════════════
 
 def _equity_loop():
@@ -409,7 +409,7 @@ def _equity_loop():
 
 
 # ══════════════════════════════════════════════
-#  AUTO-TRADING LOOP — every 60 seconds
+#  AUTO-TRADING LOOP - every 60 seconds
 # ══════════════════════════════════════════════
 
 _auto_status = {
@@ -436,7 +436,7 @@ def _auto_loop():
     from analyzer        import analyze
     from decision_engine import decide
 
-    _log("Auto-trading started — BTC + ETH — max 3 open — 6 trades/day")
+    _log("Auto-trading started - BTC + ETH - max 3 open - 6 trades/day")
 
     while _auto_status["running"]:
         try:
@@ -448,7 +448,7 @@ def _auto_loop():
                 # ── Stage 1: Scan ──────────────────────
                 scan_data = scan(symbol)
                 if not scan_data["candles"]:
-                    _log(f"{symbol} — No candle data")
+                    _log(f"{symbol} - No candle data")
                     continue
 
                 # ── Stage 2: Analyze ───────────────────
@@ -475,9 +475,9 @@ def _auto_loop():
 
                 # ── Stage 4: Execute ───────────────────
                 if dec == "WAIT":
-                    continue   # Never log WAIT to journal — no spam
+                    continue   # Never log WAIT to journal - no spam
 
-                _log(f"{symbol} — {dec} | Conf {conf}% | "
+                _log(f"{symbol} - {dec} | Conf {conf}% | "
                      f"{analysis['ms']['trend']}")
 
                 result = open_trade(symbol, dec, analysis, decision)
@@ -486,7 +486,7 @@ def _auto_loop():
                     key = f"{symbol}_rej"
                     if _last_reason.get(key) != result["reason"]:
                         _last_reason[key] = result["reason"]
-                        _log(f"{symbol} — Skipped: {result['reason']}")
+                        _log(f"{symbol} - Skipped: {result['reason']}")
                 else:
                     _last_reason[f"{symbol}_rej"] = ""  # reset on success
 
