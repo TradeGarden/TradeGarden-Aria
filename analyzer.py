@@ -1,5 +1,5 @@
 """
-analyzer.py — Stage 2: ANALYZE
+analyzer.py - Stage 2: ANALYZE
 ================================
 Responsibilities:
   - EMA 20 / 50
@@ -394,9 +394,9 @@ def mtf_bias(frames: list) -> str:
     sells = sum(1 for f in frames if f["decision"] == "SELL")
     if buys >= 3:    return "Long-term Bullish"
     if sells >= 3:   return "Long-term Bearish"
-    if buys > sells: return "Short-term Bearish · Long-term Bullish — Wait for confirmation"
-    if sells > buys: return "Short-term Bullish · Long-term Bearish — Wait for confirmation"
-    return "Mixed — No clear bias. Wait."
+    if buys > sells: return "Short-term Bearish · Long-term Bullish - Wait for confirmation"
+    if sells > buys: return "Short-term Bullish · Long-term Bearish - Wait for confirmation"
+    return "Mixed - No clear bias. Wait."
 
 
 # ──────────────────────────────────────────────
@@ -405,7 +405,7 @@ def mtf_bias(frames: list) -> str:
 
 def analyze(scan_data: dict) -> dict:
     """
-    Stage 2 — ANALYZE.
+    Stage 2 - ANALYZE.
     Takes the raw scan snapshot and returns all calculated indicators.
     No decision is made here.
     """
