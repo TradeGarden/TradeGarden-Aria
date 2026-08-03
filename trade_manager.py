@@ -1,5 +1,5 @@
 """
-trade_manager.py — Stage 5: MANAGE
+trade_manager.py - Stage 5: MANAGE
 =====================================
 Runs as a separate background service alongside main.py.
 
@@ -51,7 +51,7 @@ def notify(message: str):
     Extend this to send Telegram / email / webhook alerts.
     """
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    print(f"[ARIA NOTIFY] {timestamp} — {message}")
+    print(f"[ARIA NOTIFY] {timestamp} - {message}")
     # TODO: Add Telegram bot, email, or webhook here
 
 
@@ -113,7 +113,7 @@ def close_trade(position: dict, current_price: float, reason: str):
         "closed_at":   datetime.utcnow().isoformat(),
     })
 
-    notify(f"{position['symbol']} {side} CLOSED — P/L: ${pl:,.2f} | Reason: {reason} | New Balance: ${new_balance:,.2f}")
+    notify(f"{position['symbol']} {side} CLOSED - P/L: ${pl:,.2f} | Reason: {reason} | New Balance: ${new_balance:,.2f}")
     return pl
 
 
@@ -193,10 +193,10 @@ def check_reversal(position: dict, candles: list) -> bool:
     for p in patterns:
         if p["strength"] == "Strong":
             if side == "BUY"  and p["direction"] == "Bearish":
-                notify(f"⚠️ Reversal detected on {position['symbol']} — {p['name']} (Short position open)")
+                notify(f"⚠️ Reversal detected on {position['symbol']} - {p['name']} (Short position open)")
                 return True
             if side == "SELL" and p["direction"] == "Bullish":
-                notify(f"⚠️ Reversal detected on {position['symbol']} — {p['name']} (Long position open)")
+                notify(f"⚠️ Reversal detected on {position['symbol']} - {p['name']} (Long position open)")
                 return True
     return False
 
@@ -210,7 +210,7 @@ def monitor():
     Main trade management loop.
     Runs every SCAN_INTERVAL_SECONDS seconds.
     """
-    notify("Trade Manager started — monitoring every 60 seconds")
+    notify("Trade Manager started - monitoring every 60 seconds")
 
     while True:
         try:
