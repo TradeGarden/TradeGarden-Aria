@@ -1,15 +1,15 @@
 """
-database.py — PostgreSQL Persistent Storage
+database.py - PostgreSQL Persistent Storage
 =============================================
 Replaces all file-based storage (paper_balance.txt, paper_position.json, trade_journal.json).
-Everything lives in PostgreSQL — survives restarts, sleep cycles, and redeploys.
+Everything lives in PostgreSQL - survives restarts, sleep cycles, and redeploys.
 
 Tables:
-  account       — balance, equity, paper/live mode
-  positions     — open trades
-  trade_history — every completed trade, permanent
-  journal       — every action (OPEN, CLOSE, WAIT, SL_MOVE, etc.)
-  price_cache   — last known prices
+  account       - balance, equity, paper/live mode
+  positions     - open trades
+  trade_history - every completed trade, permanent
+  journal       - every action (OPEN, CLOSE, WAIT, SL_MOVE, etc.)
+  price_cache   - last known prices
 
 Setup:
   1. Create a PostgreSQL database on Render (free tier)
@@ -37,7 +37,7 @@ def get_conn():
 
 
 # ══════════════════════════════════════════════
-#  SETUP — create all tables on first run
+#  SETUP - create all tables on first run
 # ══════════════════════════════════════════════
 
 def setup_database():
@@ -126,7 +126,7 @@ def setup_database():
 
 
 # ══════════════════════════════════════════════
-#  ACCOUNT — balance and equity
+#  ACCOUNT - balance and equity
 # ══════════════════════════════════════════════
 
 def get_account() -> dict:
@@ -148,7 +148,7 @@ def update_balance(new_balance: float):
 
 
 def update_equity(equity: float):
-    """Update equity only (floating P/L) — balance unchanged until trade closes."""
+    """Update equity only (floating P/L) - balance unchanged until trade closes."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -189,7 +189,7 @@ def save_balance(b: float):
 
 
 # ══════════════════════════════════════════════
-#  POSITIONS — open trades
+#  POSITIONS - open trades
 # ══════════════════════════════════════════════
 
 def save_position(position: dict):
@@ -288,7 +288,7 @@ def clear_position():
 
 
 # ══════════════════════════════════════════════
-#  TRADE HISTORY — permanent record of every closed trade
+#  TRADE HISTORY - permanent record of every closed trade
 # ══════════════════════════════════════════════
 
 def save_closed_trade(trade: dict):
@@ -349,7 +349,7 @@ def load_closed_trades(days: int = 999) -> list:
 
 
 # ══════════════════════════════════════════════
-#  JOURNAL — every action logged permanently
+#  JOURNAL - every action logged permanently
 # ══════════════════════════════════════════════
 
 def append_trade(entry: dict):
