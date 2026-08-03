@@ -595,6 +595,10 @@ async def dashboard(symbol: str = "BTCUSD"):
 
   {pos_block}
 
+  <div id="total-floating-pl" style="font-size:13px;color:#888;text-align:center;padding:4px 0;display:{'none' if not open_positions else 'block'}">
+    Calculating total P/L...
+  </div>
+
   <div class="card">
     <div class="card-title">Manual Override</div>
     <div style="font-size:11px;color:#333;margin-bottom:8px">
@@ -611,15 +615,27 @@ async def dashboard(symbol: str = "BTCUSD"):
 <script>
 function updateEquity() {{
   fetch('/api/equity').then(r=>r.json()).then(data=>{{
+    // Update equity display
     var eq = document.getElementById('live-equity');
-    var pl = document.getElementById('live-pl');
     if(eq) {{
       eq.textContent = '$' + data.equity.toLocaleString('en-US',{{minimumFractionDigits:2,maximumFractionDigits:2}});
       eq.style.color = data.equity >= data.balance ? '#2ecc71' : '#e74c3c';
     }}
-    if(pl && data.has_position) {{
-      pl.textContent = 'P/L: $' + data.floating_pl.toFixed(2);
-      pl.style.color = data.floating_pl >= 0 ? '#2ecc71' : '#e74c3c';
+    // Update each position P/L individually
+    if(data.positions) {{
+      data.positions.forEach(function(pos) {{
+        var el = document.getElementById('live-pl-' + pos.trade_id);
+        if(el) {{
+          el.textContent = 'P/L: $' + pos.pl.toFixed(2);
+          el.style.color = pos.pl >= 0 ? '#2ecc71' : '#e74c3c';
+        }}
+      }});
+    }}
+    // Update total floating P/L if shown
+    var totalPl = document.getElementById('total-floating-pl');
+    if(totalPl) {{
+      totalPl.textContent = 'Floating: $' + data.floating_pl.toFixed(2);
+      totalPl.style.color = data.floating_pl >= 0 ? '#2ecc71' : '#e74c3c';
     }}
   }}).catch(function(){{}});
 }}
@@ -875,25 +891,43 @@ async def api_analyze(symbol: str = "BTCUSD"):
 
 @app.get("/api/equity")
 async def api_equity():
-    """Called every 5 seconds by the frontend to update equity live."""
-    account  = get_account()
-    position = load_position()
-    pl = 0.0
-    price = 0.0
-    if position:
-        from scanner import fetch_current_price
-        price = fetch_current_price(position["symbol"])
-        entry = position["entry_price"]
-        size  = position["size"]
-        side  = position["side"]
-        pl    = (price-entry)*size if side=="BUY" else (entry-price)*size
-        pl    = round(pl, 2)
+    """Called every 5 seconds by frontend — sums ALL open positions for equity."""
+    from database import recalc_equity
+    account   = get_account()
+    positions = get_open_positions()
+    total_pl  = 0.0
+    pos_data  = []
+    prices    = {}
+    for pos in positions:
+        sym = pos["symbol"]
+        if sym not in prices:
+            prices[sym] = fetch_current_price(sym)
+        p     = prices[sym]
+        entry = pos["entry_price"]
+        size  = pos["size"]
+        side  = pos["side"]
+        fl    = (p-entry)*size if side=="BUY" else (entry-p)*size
+        fl    = round(fl, 2)
+        total_pl += fl
+        pos_data.append({
+            "trade_id": pos.get("trade_id",""),
+            "symbol":   sym,
+            "side":     side,
+            "pl":       fl,
+            "price":    p,
+        })
+    # Recalculate and save equity in DB
+    if positions:
+        equity = recalc_equity(prices)
+    else:
+        equity = float(account["balance"])
+    balance = float(account["balance"])
     return {
-        "balance":    float(account["balance"]),
-        "equity":     float(account["equity"]),
-        "floating_pl":pl,
-        "current_price": price,
-        "has_position": position is not None,
+        "balance":     balance,
+        "equity":      equity,
+        "floating_pl": round(total_pl, 2),
+        "positions":   pos_data,
+        "has_position":len(positions) > 0,
     }
 
 @app.get("/health")
