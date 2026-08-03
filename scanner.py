@@ -1,5 +1,5 @@
 """
-scanner.py — Stage 1: SCAN
+scanner.py - Stage 1: SCAN
 ===========================
 Responsibilities:
   - Fetch live BTC/ETH prices
@@ -59,7 +59,7 @@ def fetch_candles_kraken(symbol: str, interval_min: int = 1440, limit: int = 120
 
 def fetch_candles_coingecko(symbol: str) -> list:
     """
-    CoinGecko market_chart fallback — daily candles, last 100 days.
+    CoinGecko market_chart fallback - daily candles, last 100 days.
     Used when Kraken is unavailable.
     """
     coin = "bitcoin" if "BTC" in symbol else "ethereum"
@@ -168,7 +168,7 @@ def get_trading_session() -> str:
 
 def scan(symbol: str) -> dict:
     """
-    Stage 1 — SCAN.
+    Stage 1 - SCAN.
     Collects all raw market data needed by the analyzer.
     Returns a clean snapshot dict. No analysis is done here.
     """
