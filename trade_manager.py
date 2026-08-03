@@ -26,7 +26,9 @@ from datetime import datetime
 
 from scanner import fetch_current_price, fetch_candles
 from analyzer import calc_atr, detect_patterns, calc_market_structure
-from executor import load_position, load_balance, save_balance, clear_position
+from database import (
+    get_open_positions, load_balance, save_balance, clear_position
+)
 from journal import append_trade
 
 # ──────────────────────────────────────────────
@@ -214,7 +216,8 @@ def monitor():
 
     while True:
         try:
-            position = load_position()
+            positions = get_open_positions()
+            position = positions[0] if positions else None
 
             if not position:
                 time.sleep(SCAN_INTERVAL_SECONDS)
