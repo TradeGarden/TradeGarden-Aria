@@ -1,5 +1,5 @@
 """
-journal.py — Stage 6: REVIEW
+journal.py - Stage 6: REVIEW
 ==============================
 Now backed by PostgreSQL via database.py.
 Nothing is ever lost. Survives restarts.
