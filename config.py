@@ -43,7 +43,11 @@ EXECUTION_TIMEFRAME = "15m"   # Final entry signal comes from here
 #  RISK MANAGEMENT
 # ──────────────────────────────────────────────
 
-RISK_PER_TRADE_PCT  = 1.0     # Risk 1% of balance per trade
+RISK_PER_TRADE_PCT  = 1.0     # Base risk 1% of balance per trade
+# Confidence-based scaling applied on top:
+#   60-69% confidence → 20% of risk (test position)
+#   70-84% confidence → 50% of risk (half position)
+#   85%+   confidence → 100% of risk (full position)
 DAILY_LOSS_LIMIT_PCT= 3.0     # Stop trading if daily loss hits 3%
 MIN_RISK_REWARD     = 2.0     # Minimum R:R ratio (1:2)
 SL_ATR_MULTIPLIER   = 1.5     # Stop loss = entry ± (ATR × 1.5)
