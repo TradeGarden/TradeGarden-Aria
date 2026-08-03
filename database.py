@@ -158,6 +158,28 @@ def update_equity(equity: float):
         conn.commit()
 
 
+def recalc_equity(prices: dict) -> float:
+    """
+    Recalculate equity from ALL open positions.
+    prices = {"BTCUSD": 64000.0, "ETHUSD": 3400.0}
+    equity = balance + sum of all floating P/L
+    """
+    balance = load_balance()
+    positions = get_open_positions()
+    total_floating = 0.0
+    for pos in positions:
+        sym   = pos["symbol"]
+        price = prices.get(sym, pos["entry_price"])
+        entry = pos["entry_price"]
+        size  = pos["size"]
+        side  = pos["side"]
+        fl = (price - entry) * size if side == "BUY" else (entry - price) * size
+        total_floating += fl
+    equity = round(balance + total_floating, 2)
+    update_equity(equity)
+    return equity
+
+
 def load_balance() -> float:
     return float(get_account()["balance"])
 
