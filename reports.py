@@ -1,5 +1,5 @@
 """
-reports.py — Stage 7: REPORTS
+reports.py - Stage 7: REPORTS
 ================================
 Reads from PostgreSQL trade_history table via database.py.
 """
