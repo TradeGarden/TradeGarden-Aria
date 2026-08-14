@@ -790,7 +790,7 @@ def _auto_loop():
     from analyzer        import analyze
     from decision_engine import decide
 
-    _log("Aria v2 started - FAST_SCALPER + TREND_RUNNER modes")
+    _log("Aria started - scanning BTC + ETH every 5 minutes")
 
     while _auto_status["running"]:
         try:
@@ -799,9 +799,10 @@ def _auto_loop():
             for symbol in VALID_SYMBOLS:
                 _auto_status["scans_today"] += 1
 
-                # Stage 1: Scan
+                # Stage 1: Scan (Binance primary, Kraken fallback)
                 scan_data = scan(symbol)
                 if not scan_data["candles"]:
+                    _log(f"{symbol} - No candle data from Binance or Kraken")
                     continue
 
                 # Stage 2: Analyze
@@ -809,8 +810,11 @@ def _auto_loop():
                 if "error" in analysis:
                     continue
                 analysis["candles"] = scan_data["candles"]
-                candles = scan_data["candles"]
+                candles       = scan_data["candles"]
                 current_price = analysis["price"]
+                _log(f"{symbol} - Price ${current_price:,.2f} | "
+                     f"Source: {scan_data.get('source','?')} | "
+                     f"Candles: {len(candles)}")
 
                 # Manage all open positions
                 for pos in [p for p in get_open_positions()
@@ -850,7 +854,8 @@ def _auto_loop():
         except Exception as e:
             _log(f"Error: {e}")
 
-        for _ in range(60):
+        # Scan every 5 minutes for real scalping timeframes
+        for _ in range(300):
             if not _auto_status["running"]:
                 break
             time.sleep(1)
