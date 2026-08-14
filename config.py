@@ -1,5 +1,5 @@
 """
-config.py - Scalper Configuration
+config.py - Aria Scalper Configuration
 All trading rules in one place. Aria never changes these automatically.
 """
 import os
@@ -75,5 +75,8 @@ MT5_BRIDGE_KEY = os.getenv("MT5_BRIDGE_KEY", "aria-secret")
 USE_MT5        = bool(MT5_BRIDGE_URL)
 
 # Dashboard
-DASHBOARD_REFRESH_SECONDS = 30
+DASHBOARD_REFRESH_SECONDS = 30   # Dashboard auto-refresh
 MIN_TRADES_FOR_RECS       = 5
+
+# Auto-scan interval
+SCAN_INTERVAL_SECONDS = 300  # 5 minutes
