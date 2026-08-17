@@ -103,7 +103,12 @@ def get_account() -> dict:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM account WHERE id = 1")
             row = cur.fetchone()
-            return dict(row) if row else {"balance": 500.0, "equity": 500.0, "mode": "paper"}
+            if row:
+                d = dict(row)
+                d["balance"] = float(d.get("balance", 500.0))
+                d["equity"]  = float(d.get("equity",  500.0))
+                return d
+            return {"balance": 500.0, "equity": 500.0, "mode": "paper"}
 
 def load_balance() -> float:
     return float(get_account()["balance"])
