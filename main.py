@@ -567,7 +567,7 @@ async def dashboard(symbol: str = "BTCUSD"):
       <div class="stat"><div class="v">1:{levels['rr']}</div><div class="l">R/R</div></div>
       <div class="stat"><div class="v">${risk_usd:.2f}</div><div class="l">Risk (1%)</div></div>
       <div class="stat"><div class="v">${balance:,.2f}</div><div class="l">Balance</div></div>
-      <div class="stat"><div class="v" id="live-equity" style="color:{'#2ecc71' if account['equity']>=balance else '#e74c3c'}">${account['equity']:,.2f}</div><div class="l">Equity</div></div>
+      <div class="stat"><div class="v" id="live-equity" style="color:#2ecc71">${float(account['equity']):,.2f}</div><div class="l">Equity</div></div>
     </div>
   </div>
 
