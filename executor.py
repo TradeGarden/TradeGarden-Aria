@@ -169,10 +169,9 @@ def check_rules(symbol: str, side: str, analysis: dict,
     if todays_loss_pct(balance) >= DAILY_LOSS_LIMIT_PCT:
         return {"approved": False, "reason": f"Daily loss limit hit."}
 
-    # No duplicate symbol+side
-    if any(p["symbol"]==symbol and p["side"]==side
-           for p in get_open_positions()):
-        return {"approved": False, "reason": f"{symbol} {side} already open."}
+    # One open position per symbol max (can re-enter after close)
+    if any(p["symbol"] == symbol for p in get_open_positions()):
+        return {"approved": False, "reason": f"{symbol} position already open."}
 
     # Structure
     if ms["trend"] != cond["market_structure"]:
