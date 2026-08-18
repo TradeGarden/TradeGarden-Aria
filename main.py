@@ -41,6 +41,7 @@ from executor        import (
     start_auto_trading, stop_auto_trading, get_auto_status,
 )
 from database        import load_balance as _db_load_balance
+from database        import load_position
 from journal         import load_recent
 from reports         import daily_report, weekly_report, monthly_report
 from recommendations import generate as get_recommendations
