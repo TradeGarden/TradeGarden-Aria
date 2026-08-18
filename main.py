@@ -30,8 +30,10 @@ from datetime import datetime
 import os
 
 # ── Module imports ──
-from database        import (setup_database, get_account, load_balance as db_load_balance,
-                              get_open_positions, get_open_positions_count)
+from database        import (
+    setup_database, get_account, load_balance,
+    get_open_positions, get_open_positions_count, load_position,
+)
 from scanner         import scan, fetch_current_price
 from analyzer        import analyze
 from decision_engine import decide
@@ -40,8 +42,6 @@ from executor        import (
     todays_trade_count, todays_loss_pct,
     start_auto_trading, stop_auto_trading, get_auto_status,
 )
-from database        import load_balance as _db_load_balance
-from database        import load_position
 from journal         import load_recent
 from reports         import daily_report, weekly_report, monthly_report
 from recommendations import generate as get_recommendations
