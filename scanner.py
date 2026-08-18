@@ -122,5 +122,3 @@ def scan_timeframes(symbol: str) -> dict:
         "1H":    fetch_candles(symbol, "1H"),
         "Daily": fetch_candles(symbol, "Daily"),
     }
-EOF
-echo "scanner.py done"
