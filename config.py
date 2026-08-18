@@ -19,7 +19,7 @@ SL_ATR_MULTIPLIER    = 0.4   # Very tight stop (0.4x ATR)
 TP_ATR_MULTIPLIER    = 0.6   # Quick TP (0.6x ATR)
 
 # Trade frequency
-MAX_TRADES_PER_DAY = 100     # Up to 100 trades/day
+MAX_TRADES_PER_DAY = 100     # Up to 100 trades/day - scalper mode
 MAX_OPEN_POSITIONS = 2       # BTC + ETH simultaneously
 MIN_CONFIDENCE     = 60      # Lower threshold for more trades
 
@@ -27,11 +27,11 @@ MIN_CONFIDENCE     = 60      # Lower threshold for more trades
 BREAKEVEN_USD    = 2.0   # Move SL to BE at +$2
 PARTIAL_TP_USD   = 4.0   # Close 50% at +$4
 TRAIL_AFTER_USD  = 6.0   # Trail remainder after +$6
-TIMEOUT_MINUTES  = 60    # Close if stuck > 60 minutes
+TIMEOUT_MINUTES  = 30    # Close if stuck > 30 minutes
 MIN_PROFIT_USD   = 0.50  # Min profit to hold past timeout
 
 # Scan speed
-SCAN_INTERVAL_SECONDS   = 60   # Scan every 60 seconds
+SCAN_INTERVAL_SECONDS = 60     # Scan every 60 seconds
 DASHBOARD_REFRESH_SECONDS = 30
 
 # Entry conditions
