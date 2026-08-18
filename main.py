@@ -360,21 +360,42 @@ async def dashboard(symbol: str = "BTCUSD"):
     if symbol not in VALID_SYMBOLS:
         symbol = "BTCUSD"
 
-    scan_data = scan(symbol)
+    try:
+        scan_data = scan(symbol)
+    except Exception as e:
+        return HTMLResponse(
+            f"<html><body style='background:#090909;color:#e74c3c;"
+            f"font-family:Arial;padding:30px'>"
+            f"<h2>Scan error: {e}</h2>"
+            f"<a href='/' style='color:#444;display:block;margin-top:16px'>Retry</a>"
+            f"</body></html>"
+        )
+
     if not scan_data["candles"]:
         return HTMLResponse(
             f"<html><body style='background:#090909;color:#e74c3c;"
             f"font-family:Arial;padding:30px'>"
-            f"<h2>⚠️ Market data unavailable</h2>"
-            f"<a href='/' style='color:#444;display:block;margin-top:16px'>↻ Retry</a>"
+            f"<h2>No candle data from Kraken. Will retry on next refresh.</h2>"
+            f"<a href='/' style='color:#2ecc71;display:block;margin-top:16px'>Retry now</a>"
             f"</body></html>"
         )
 
-    analysis = analyze(scan_data)
-    decision = decide(analysis)
-    account        = get_account()
-    balance        = float(account['balance'])
-    open_positions = get_open_positions()
+    try:
+        analysis = analyze(scan_data)
+        decision = decide(analysis)
+        account        = get_account()
+        balance        = float(account['balance'])
+        open_positions = get_open_positions()
+    except Exception as e:
+        import traceback
+        err = traceback.format_exc()
+        return HTMLResponse(
+            f"<html><body style='background:#090909;color:#e74c3c;"
+            f"font-family:Arial;padding:30px;white-space:pre'>"
+            f"<h2>Dashboard error:</h2>{err}"
+            f"<br><a href='/' style='color:#2ecc71'>Retry</a>"
+            f"</body></html>"
+        )
     position       = open_positions[0] if open_positions else None
     price    = scan_data["price"]
     dec      = decision["decision"]
