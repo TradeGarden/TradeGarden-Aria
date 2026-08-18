@@ -381,12 +381,12 @@ def analyze_timeframe(candles: list, label: str) -> dict:
 
 def multi_timeframe_analysis(symbol: str) -> list:
     tf_data = scan_timeframes(symbol)
-    return [
-        analyze_timeframe(tf_data["15m"],   "15m"),
-        analyze_timeframe(tf_data["1H"],    "1H"),
-        analyze_timeframe(tf_data["4H"],    "4H"),
-        analyze_timeframe(tf_data["Daily"], "Daily"),
-    ]
+    frames = []
+    for label in ["15m", "1H", "Daily"]:
+        candles = tf_data.get(label, [])
+        if len(candles) >= 10:
+            frames.append(analyze_timeframe(candles, label))
+    return frames
 
 
 def mtf_bias(frames: list) -> str:
