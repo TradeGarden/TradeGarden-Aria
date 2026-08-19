@@ -126,8 +126,8 @@ def determine_signal(analysis: dict) -> str:
     r    = analysis["rsi14"]
     ms   = analysis["ms"]
 
-    bull = e20 > e50 and r < 70 and ms["trend"] == "Bullish"
-    bear = e20 < e50 and r > 30 and ms["trend"] == "Bearish"
+    bull = e20 > e50 and r < 80 and ms["trend"] == "Bullish"
+    bear = e20 < e50 and r > 20 and ms["trend"] == "Bearish"
 
     if bull:  return "BUY"
     if bear:  return "SELL"
@@ -141,11 +141,11 @@ def determine_signal(analysis: dict) -> str:
 def calc_trade_levels(price: float, atr: float, decision: str) -> dict:
     """ATR-based stop loss and take profit. R:R always 1:2."""
     if decision == "BUY":
-        sl = round(price - atr * 1.5, 2)
-        tp = round(price + atr * 3.0, 2)
+        sl = round(price - atr * 0.4, 2)
+        tp = round(price + atr * 0.6, 2)
     elif decision == "SELL":
-        sl = round(price + atr * 1.5, 2)
-        tp = round(price - atr * 3.0, 2)
+        sl = round(price + atr * 0.4, 2)
+        tp = round(price - atr * 0.6, 2)
     else:
         sl = round(price - atr * 1.5, 2)
         tp = round(price + atr * 1.5, 2)
