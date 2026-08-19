@@ -392,10 +392,21 @@ async def dashboard(symbol: str = "BTCUSD"):
             intel = get_intelligence(symbol)
         except Exception:
             intel = {"fear_greed": {"value": 50, "label": "N/A", "signal": "NEUTRAL"},
-                     "news": [], "funding": {"rate": 0, "signal": "NEUTRAL"},
-                     "open_interest": {"open_interest": 0, "change_24h_pct": 0},
+                     "news": [], "funding": {"rate": 0, "signal": "NEUTRAL", "annualized": 0},
+                     "open_interest": {"open_interest": 0, "change_24h_pct": 0, "signal": "STABLE"},
                      "economic_events": [], "overall_signal": "NEUTRAL",
                      "high_impact_event": False}
+        # Build news HTML
+        news_html = ""
+        for n in intel.get("news", [])[:4]:
+            nc = "#2ecc71" if n.get("sentiment")=="BULLISH" else "#e74c3c" if n.get("sentiment")=="BEARISH" else "#333"
+            news_html += (f"<div style='margin-top:8px;padding:8px;background:#0d0d0d;"
+                         f"border-radius:6px;border-left:2px solid {nc}'>"
+                         f"<div style='font-size:12px;color:#ccc'>{n.get('title','')[:80]}...</div>"
+                         f"<div style='font-size:10px;color:#333;margin-top:3px'>"
+                         f"{n.get('source','')} · {n.get('published_at','')} · {n.get('sentiment','')}</div></div>")
+        if not news_html:
+            news_html = "<div style='color:#333;font-size:12px;padding:8px'>No news available yet</div>" 
     except Exception as e:
         import traceback
         err = traceback.format_exc()
@@ -576,7 +587,7 @@ async def dashboard(symbol: str = "BTCUSD"):
           {'<div style="margin-top:6px;padding:5px 8px;background:#2e1a00;border-radius:4px;font-size:11px;color:#f39c12">⚠️ High Impact Event Today</div>' if intel['high_impact_event'] else ''}
         </div>
       </div>
-      {"".join(f'<div style="margin-top:8px;padding:8px;background:#0d0d0d;border-radius:6px;border-left:2px solid {"#2ecc71" if n["sentiment"]=="BULLISH" else "#e74c3c" if n["sentiment"]=="BEARISH" else "#333"}"><div style="font-size:12px;color:#ccc">{n["title"][:80]}...</div><div style="font-size:10px;color:#333;margin-top:3px">{n["source"]} · {n["published_at"]} · {n["sentiment"]}</div></div>' for n in intel["news"][:4]) if intel["news"] else '<div style="color:#333;font-size:12px;padding:8px">No news available</div>'}
+      {news_html}
     </div>
 
   </div>
