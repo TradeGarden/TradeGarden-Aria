@@ -120,5 +120,6 @@ def scan_timeframes(symbol: str) -> dict:
     return {
         "15m":   fetch_candles(symbol, "15m"),
         "1H":    fetch_candles(symbol, "1H"),
+        "4H":    fetch_candles(symbol, "4H"),
         "Daily": fetch_candles(symbol, "Daily"),
     }
