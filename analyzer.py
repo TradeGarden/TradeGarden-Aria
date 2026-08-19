@@ -382,7 +382,7 @@ def analyze_timeframe(candles: list, label: str) -> dict:
 def multi_timeframe_analysis(symbol: str) -> list:
     tf_data = scan_timeframes(symbol)
     frames = []
-    for label in ["15m", "1H", "Daily"]:
+    for label in ["15m", "1H", "4H", "Daily"]:
         candles = tf_data.get(label, [])
         if len(candles) >= 10:
             frames.append(analyze_timeframe(candles, label))
