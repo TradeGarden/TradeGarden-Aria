@@ -45,6 +45,7 @@ from executor        import (
 from journal         import load_recent
 from reports         import daily_report, weekly_report, monthly_report
 from recommendations import generate as get_recommendations
+from intelligence    import get_intelligence, intelligence_score
 from config          import (
     VALID_SYMBOLS, TRADINGVIEW_SYMBOLS,
     DASHBOARD_REFRESH_SECONDS, MIN_CONFIDENCE,
@@ -386,6 +387,15 @@ async def dashboard(symbol: str = "BTCUSD"):
         account        = get_account()
         balance        = float(account['balance'])
         open_positions = get_open_positions()
+        # Intelligence engine (non-blocking - fails gracefully)
+        try:
+            intel = get_intelligence(symbol)
+        except Exception:
+            intel = {"fear_greed": {"value": 50, "label": "N/A", "signal": "NEUTRAL"},
+                     "news": [], "funding": {"rate": 0, "signal": "NEUTRAL"},
+                     "open_interest": {"open_interest": 0, "change_24h_pct": 0},
+                     "economic_events": [], "overall_signal": "NEUTRAL",
+                     "high_impact_event": False}
     except Exception as e:
         import traceback
         err = traceback.format_exc()
@@ -536,6 +546,37 @@ async def dashboard(symbol: str = "BTCUSD"):
       <div style="font-size:13px;line-height:1.9;color:#bbb;white-space:pre-wrap;margin-top:8px">
         {decision['narrative']}
       </div>
+    </div>
+
+    <div class="adv-card" style="grid-column:1/-1">
+      <h4>Intelligence Feed</h4>
+      <div class="explain">Fear and Greed · Funding Rate · Open Interest · News · Economic Events</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-top:10px">
+        <div style="background:#0d0d0d;border-radius:8px;padding:12px">
+          <div style="font-size:10px;color:#444;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Fear & Greed</div>
+          <div style="font-size:22px;font-weight:bold;color:{'#e74c3c' if intel['fear_greed']['value']>75 else '#2ecc71' if intel['fear_greed']['value']<25 else '#f39c12' if intel['fear_greed']['value']<45 else '#888'}">{intel['fear_greed']['value']}</div>
+          <div style="font-size:12px;color:#555;margin-top:2px">{intel['fear_greed']['label']}</div>
+          <div style="font-size:11px;color:#333;margin-top:4px">{intel['fear_greed']['signal'].replace('_',' ')}</div>
+        </div>
+        <div style="background:#0d0d0d;border-radius:8px;padding:12px">
+          <div style="font-size:10px;color:#444;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Funding Rate</div>
+          <div style="font-size:18px;font-weight:bold;color:{'#e74c3c' if intel['funding']['rate']>0.01 else '#2ecc71' if intel['funding']['rate']<-0.01 else '#888'}">{intel['funding']['rate']:+.4f}%</div>
+          <div style="font-size:12px;color:#555;margin-top:2px">{intel['funding']['signal'].replace('_',' ')}</div>
+          <div style="font-size:11px;color:#333;margin-top:4px">Ann: {intel['funding']['annualized']:+.1f}%</div>
+        </div>
+        <div style="background:#0d0d0d;border-radius:8px;padding:12px">
+          <div style="font-size:10px;color:#444;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Open Interest</div>
+          <div style="font-size:18px;font-weight:bold;color:#fff">${intel['open_interest']['open_interest']:.2f}B</div>
+          <div style="font-size:12px;margin-top:2px;color:{'#2ecc71' if intel['open_interest']['change_24h_pct']>0 else '#e74c3c'}">{intel['open_interest']['change_24h_pct']:+.2f}% 24h</div>
+          <div style="font-size:11px;color:#333;margin-top:4px">{intel['open_interest']['signal'].replace('_',' ')}</div>
+        </div>
+        <div style="background:#0d0d0d;border-radius:8px;padding:12px">
+          <div style="font-size:10px;color:#444;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Intelligence Signal</div>
+          <div style="font-size:18px;font-weight:bold;color:{'#2ecc71' if intel['overall_signal']=='BULLISH' else '#e74c3c' if intel['overall_signal']=='BEARISH' else '#888'}">{intel['overall_signal']}</div>
+          {'<div style="margin-top:6px;padding:5px 8px;background:#2e1a00;border-radius:4px;font-size:11px;color:#f39c12">⚠️ High Impact Event Today</div>' if intel['high_impact_event'] else ''}
+        </div>
+      </div>
+      {"".join(f'<div style="margin-top:8px;padding:8px;background:#0d0d0d;border-radius:6px;border-left:2px solid {"#2ecc71" if n["sentiment"]=="BULLISH" else "#e74c3c" if n["sentiment"]=="BEARISH" else "#333"}"><div style="font-size:12px;color:#ccc">{n["title"][:80]}...</div><div style="font-size:10px;color:#333;margin-top:3px">{n["source"]} · {n["published_at"]} · {n["sentiment"]}</div></div>' for n in intel["news"][:4]) if intel["news"] else '<div style="color:#333;font-size:12px;padding:8px">No news available</div>'}
     </div>
 
   </div>
