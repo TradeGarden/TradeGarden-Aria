@@ -188,6 +188,7 @@ def _topbar(symbol: str = "", active: str = "") -> str:
     <a href="/weekly"          class="sym-btn {acls('weekly')}">📊 Reports</a>
     <a href="/recommendations" class="sym-btn {acls('recs')}">💡 Recs</a>
     <a href="/journal"         class="sym-btn {acls('journal')}">📖 Journal</a>
+    <a href="/intelligence"    class="sym-btn {acls('intel')}">🧠 Intel</a>
     <a href="/rules"           class="sym-btn {acls('rules')}">⚙️ Rules</a>
   </div>
 </div>"""
@@ -1003,6 +1004,304 @@ async def api_equity():
         "positions":   pos_data,
         "has_position":len(positions) > 0,
     }
+
+@app.get("/intelligence", response_class=HTMLResponse)
+async def intelligence_page():
+    """Full Intelligence Feed - News, Whales, Funding, Flows, Calendar."""
+    from intelligence import get_intelligence
+
+    # Fetch all intelligence (non-blocking)
+    try:
+        intel = get_intelligence("BTCUSD")
+    except Exception as e:
+        intel = {}
+
+    fg       = intel.get("fear_greed",     {"value":50,"label":"N/A","signal":"NEUTRAL","change":0})
+    news     = intel.get("news",           [])
+    funding  = intel.get("funding",        {})
+    oi       = intel.get("open_interest",  {})
+    liq      = intel.get("liquidations",   {})
+    ls       = intel.get("long_short",     {})
+    whales   = intel.get("whale_txns",     [])
+    flows    = intel.get("exchange_flows", {})
+    events   = intel.get("economic_events",[])
+    markets  = intel.get("global_markets", {})
+    overall  = intel.get("overall_signal", "NEUTRAL")
+    ts       = intel.get("timestamp",      "")
+
+    fgv = fg.get("value", 50)
+    fgc = ("#00bfff" if fgv <= 25 else "#2ecc71" if fgv <= 45 else
+           "#888" if fgv <= 55 else "#f39c12" if fgv <= 75 else "#e74c3c")
+    oc  = "#2ecc71" if overall=="BULLISH" else "#e74c3c" if overall=="BEARISH" else "#888"
+
+    def sig_color(s):
+        bull_sigs = {"BULLISH","EXTREME_FEAR","SHORTS_DOMINANT","OVERHEATED_SHORTS",
+                     "FROM_EXCHANGE","STRONG_EXPANSION","BEARISH_DXY"}
+        bear_sigs = {"BEARISH","EXTREME_GREED","LONGS_DOMINANT","OVERHEATED_LONGS",
+                     "TO_EXCHANGE","STRONG_CONTRACTION","BULLISH_DXY"}
+        return "#2ecc71" if s in bull_sigs else "#e74c3c" if s in bear_sigs else "#888"
+
+    # ── News cards ────────────────────────────────────
+    news_html = ""
+    for n in news[:25]:
+        nc    = "#2ecc71" if n.get("sentiment")=="BULLISH" else "#e74c3c" if n.get("sentiment")=="BEARISH" else "#444"
+        badge = ('<span style="background:#2e1a00;color:#f39c12;font-size:9px;'
+                 'padding:2px 5px;border-radius:3px;margin-left:6px">HOT</span>'
+                 if n.get("important") else "")
+        coin_badge = f'<span style="color:#555;font-size:10px;margin-right:6px">[{n.get("coin","?")}]</span>'
+        url   = n.get("url","")
+        link  = f'<a href="{url}" target="_blank" style="color:#2ecc71;font-size:10px">Read →</a>' if url else ""
+        news_html += (
+            f"<div style='border-left:3px solid {nc};padding:10px 12px;"
+            f"margin-bottom:8px;background:#0d0d0d;border-radius:0 6px 6px 0'>"
+            f"<div style='font-size:13px;color:#ccc;line-height:1.5'>"
+            f"{coin_badge}{n.get('title','')}{ badge}</div>"
+            f"<div style='margin-top:5px;display:flex;gap:10px;align-items:center'>"
+            f"<span style='font-size:10px;color:#333'>{n.get('source','')}</span>"
+            f"<span style='font-size:10px;color:#333'>{n.get('published','')}</span>"
+            f"<span style='font-size:10px;color:{nc};font-weight:bold'>{n.get('sentiment','')}</span>"
+            f"{link}</div></div>"
+        )
+    if not news_html:
+        news_html = "<div style='color:#444;padding:16px'>No news available. Refreshes every 2 minutes.</div>"
+
+    # ── Whale transaction cards ───────────────────────
+    whale_html = ""
+    for w in whales[:12]:
+        wc  = "#2ecc71" if w.get("signal")=="BULLISH" else "#e74c3c" if w.get("signal")=="BEARISH" else "#555"
+        ico = "🟢" if w.get("signal")=="BULLISH" else "🔴" if w.get("signal")=="BEARISH" else "⚪"
+        url = w.get("url","")
+        lnk = f'<a href="{url}" target="_blank" style="color:#2ecc71;font-size:10px">→</a>' if url else ""
+        whale_html += (
+            f"<div style='padding:9px 12px;border-bottom:1px solid #141414;"
+            f"display:flex;justify-content:space-between;align-items:flex-start'>"
+            f"<div><span style='margin-right:6px'>{ico}</span>"
+            f"<span style='font-size:12px;color:#ccc'>{w.get('title','')[:70]}</span></div>"
+            f"<div style='display:flex;flex-direction:column;align-items:flex-end;gap:2px'>"
+            f"<span style='font-size:9px;color:#333'>{w.get('published','')}</span>"
+            f"{lnk}</div></div>"
+        )
+    if not whale_html:
+        whale_html = "<div style='color:#444;padding:16px'>No whale transactions detected.</div>"
+
+    # ── Economic event cards ──────────────────────────
+    event_html = ""
+    for e in events[:8]:
+        url = e.get("url","")
+        lnk = f'<a href="{url}" target="_blank" style="color:#f39c12;font-size:10px">Read →</a>' if url else ""
+        event_html += (
+            f"<div style='background:#1a0f00;border:1px solid #3a2500;"
+            f"border-radius:6px;padding:10px;margin-bottom:8px'>"
+            f"<div style='font-size:13px;color:#f39c12'>{e.get('title','')}</div>"
+            f"<div style='margin-top:4px;display:flex;justify-content:space-between'>"
+            f"<span style='font-size:10px;color:#555'>{e.get('source','')} · {e.get('published','')}</span>"
+            f"{lnk}</div></div>"
+        )
+    if not event_html:
+        event_html = "<div style='color:#444;padding:10px;font-size:12px'>No high-impact events today.</div>"
+
+    # ── Funding rate rows ─────────────────────────────
+    def fund_row(coin):
+        f = funding.get(coin, {})
+        avg = f.get("average", 0)
+        ann = f.get("annualized", 0)
+        sig = f.get("signal","NEUTRAL")
+        sc  = "#2ecc71" if avg < -0.001 else "#e74c3c" if avg > 0.001 else "#888"
+        exs = f.get("exchanges", {})
+        ex_rows = "".join(
+            f"<div style='display:flex;justify-content:space-between;padding:2px 0;"
+            f"font-size:10px;color:#444'><span>{ex}</span>"
+            f"<span style='color:{'#2ecc71' if v<0 else '#e74c3c' if v>0 else '#555'}'>{v:+.4f}%</span></div>"
+            for ex, v in list(exs.items())[:5]
+        )
+        return (f"<div style='background:#0d0d0d;border-radius:8px;padding:12px;margin-bottom:8px'>"
+                f"<div style='display:flex;justify-content:space-between;margin-bottom:6px'>"
+                f"<span style='font-weight:bold;color:#fff'>{coin}</span>"
+                f"<span style='color:{sc};font-weight:bold'>{avg:+.4f}%</span></div>"
+                f"<div style='font-size:11px;color:#444;margin-bottom:6px'>"
+                f"{sig.replace('_',' ')} · Ann {ann:+.1f}%</div>"
+                f"{ex_rows}</div>")
+
+    html = f"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="120">
+<title>Aria — Intelligence</title>
+{base_css()}
+<style>
+.intel-grid{{display:grid;grid-template-columns:1fr 360px;gap:16px;padding:16px}}
+.section-title{{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:2px;
+               padding-bottom:8px;border-bottom:1px solid #111;margin-bottom:12px}}
+.metric-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;padding:16px}}
+.metric-card{{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:14px;text-align:center}}
+.metric-val{{font-size:22px;font-weight:bold;margin:4px 0}}
+.metric-lbl{{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:1px}}
+.metric-sub{{font-size:11px;color:#555;margin-top:3px}}
+@media(max-width:860px){{.intel-grid{{grid-template-columns:1fr}}}}
+</style>
+</head><body>
+{_topbar("","intel")}
+
+<!-- KEY METRICS BAR -->
+<div class="metric-grid">
+
+  <div class="metric-card">
+    <div class="metric-lbl">Fear & Greed</div>
+    <div class="metric-val" style="color:{fgc}">{fgv}</div>
+    <div class="metric-sub">{fg.get("label","N/A")}</div>
+    <div style="font-size:10px;color:#333;margin-top:3px">
+      {("+" if fg.get("change",0)>=0 else "")}{fg.get("change",0)} vs yesterday</div>
+  </div>
+
+  <div class="metric-card">
+    <div class="metric-lbl">BTC Dominance</div>
+    <div class="metric-val" style="color:#f7931a">{markets.get("btc_dominance",0)}%</div>
+    <div class="metric-sub">{markets.get("btc_dominance_signal","").replace("_"," ")}</div>
+  </div>
+
+  <div class="metric-card">
+    <div class="metric-lbl">Total Market Cap</div>
+    <div class="metric-val" style="color:#fff">${markets.get("total_mcap_usd",0):.2f}T</div>
+    <div class="metric-sub" style="color:{'#2ecc71' if markets.get('mcap_change_24h',0)>0 else '#e74c3c'}">
+      {markets.get("mcap_change_24h",0):+.2f}% 24h</div>
+  </div>
+
+  <div class="metric-card">
+    <div class="metric-lbl">DXY (Dollar)</div>
+    <div class="metric-val" style="color:{'#e74c3c' if markets.get('dxy_change',0)>0.2 else '#2ecc71' if markets.get('dxy_change',0)<-0.2 else '#888'}">{markets.get("dxy_price",0):.2f}</div>
+    <div class="metric-sub" style="color:{'#e74c3c' if markets.get('dxy_change',0)>0 else '#2ecc71'}">
+      {markets.get("dxy_change",0):+.3f} today</div>
+    <div style="font-size:10px;color:#333;margin-top:2px">
+      DXY up = BTC risk off</div>
+  </div>
+
+  <div class="metric-card">
+    <div class="metric-lbl">BTC L/S Ratio</div>
+    <div class="metric-val" style="color:{sig_color(ls.get('BTC',{}).get('signal','NEUTRAL'))}">{ls.get("BTC",{}).get("longs",50):.1f}%</div>
+    <div class="metric-sub">Longs · {ls.get("BTC",{}).get("shorts",50):.1f}% Shorts</div>
+    <div style="font-size:10px;color:#333;margin-top:2px">{ls.get("BTC",{}).get("signal","").replace("_"," ")}</div>
+  </div>
+
+  <div class="metric-card">
+    <div class="metric-lbl">ETH L/S Ratio</div>
+    <div class="metric-val" style="color:{sig_color(ls.get('ETH',{}).get('signal','NEUTRAL'))}">{ls.get("ETH",{}).get("longs",50):.1f}%</div>
+    <div class="metric-sub">Longs · {ls.get("ETH",{}).get("shorts",50):.1f}% Shorts</div>
+    <div style="font-size:10px;color:#333;margin-top:2px">{ls.get("ETH",{}).get("signal","").replace("_"," ")}</div>
+  </div>
+
+  <div class="metric-card">
+    <div class="metric-lbl">BTC Liq 1H</div>
+    <div class="metric-val" style="color:#e74c3c">${liq.get("BTC",{}).get("longs_1h",0):.1f}M</div>
+    <div class="metric-sub" style="color:#2ecc71">Shorts ${liq.get("BTC",{}).get("shorts_1h",0):.1f}M</div>
+    <div style="font-size:10px;color:{sig_color(liq.get('BTC',{}).get('signal','NEUTRAL'))};margin-top:2px">
+      {liq.get("BTC",{}).get("signal","").replace("_"," ")}</div>
+  </div>
+
+  <div class="metric-card">
+    <div class="metric-lbl">Intelligence</div>
+    <div class="metric-val" style="color:{oc}">{overall}</div>
+    <div class="metric-sub">{ts}</div>
+    {"<div style='margin-top:6px;background:#2e1a00;border-radius:4px;padding:3px 6px;font-size:10px;color:#f39c12'>⚠️ High Impact Event</div>" if intel.get("high_impact_event") else ""}
+  </div>
+
+</div>
+
+<!-- MAIN GRID -->
+<div class="intel-grid">
+
+  <!-- LEFT: NEWS + WHALES -->
+  <div>
+
+    <!-- NEWS -->
+    <div class="section-title">📰 Live News Feed — BTC & ETH</div>
+    {news_html}
+
+    <!-- WHALES -->
+    <div class="section-title" style="margin-top:20px">🐋 Whale Transactions</div>
+    <div style="background:#111;border:1px solid #1a1a1a;border-radius:10px;overflow:hidden;margin-bottom:16px">
+      <div style="padding:10px 12px;font-size:11px;color:#333;border-bottom:1px solid #141414">
+        Green = leaving exchange (bullish) · Red = entering exchange (bearish)
+      </div>
+      {whale_html}
+    </div>
+
+  </div>
+
+  <!-- RIGHT SIDEBAR -->
+  <div>
+
+    <!-- ECONOMIC EVENTS -->
+    <div class="section-title">📅 High Impact Events</div>
+    {event_html}
+
+    <!-- FUNDING RATES -->
+    <div class="section-title" style="margin-top:16px">💸 Funding Rates</div>
+    <div style="font-size:11px;color:#333;margin-bottom:8px">
+      Positive = longs crowded (bearish risk) · Negative = shorts crowded (bullish risk)
+    </div>
+    {fund_row("BTC")}
+    {fund_row("ETH")}
+
+    <!-- EXCHANGE FLOWS -->
+    <div class="section-title" style="margin-top:16px">🔄 Exchange Flows 24H</div>
+    {"".join(
+        f"<div style='background:#0d0d0d;border-radius:8px;padding:12px;margin-bottom:8px'>"
+        f"<div style='display:flex;justify-content:space-between;margin-bottom:6px'>"
+        f"<span style='font-weight:bold;color:#fff'>{coin}</span>"
+        f"<span style='color:{"#2ecc71" if flows.get(coin,{}).get("signal")=="BULLISH" else "#e74c3c" if flows.get(coin,{}).get("signal")=="BEARISH" else "#888"}'>"
+        f"{flows.get(coin,{}).get('signal','').replace('_',' ')}</span></div>"
+        f"<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;text-align:center'>"
+        f"<div style='font-size:10px;color:#444'>Inflow<br><span style='color:#e74c3c;font-size:12px'>${flows.get(coin,{}).get('inflow_24h',0):.1f}M</span></div>"
+        f"<div style='font-size:10px;color:#444'>Outflow<br><span style='color:#2ecc71;font-size:12px'>${flows.get(coin,{}).get('outflow_24h',0):.1f}M</span></div>"
+        f"<div style='font-size:10px;color:#444'>Net<br><span style='color:{'#2ecc71' if flows.get(coin,{}).get('net_flow',0)>0 else '#e74c3c'};font-size:12px'>${flows.get(coin,{}).get('net_flow',0):+.1f}M</span></div>"
+        f"</div>"
+        f"<div style='margin-top:6px;font-size:11px;color:#333'>{flows.get(coin,{}).get('interpretation','')}</div></div>"
+        for coin in ["BTC","ETH"]
+    )}
+
+    <!-- OPEN INTEREST -->
+    <div class="section-title" style="margin-top:16px">📊 Open Interest</div>
+    {"".join(
+        f"<div style='background:#0d0d0d;border-radius:8px;padding:12px;margin-bottom:8px'>"
+        f"<div style='display:flex;justify-content:space-between'>"
+        f"<span style='font-weight:bold;color:#fff'>{coin}</span>"
+        f"<span style='color:#fff;font-size:18px;font-weight:bold'>${oi.get(coin,{}).get('value_usd',0):.2f}B</span></div>"
+        f"<div style='display:flex;justify-content:space-between;margin-top:6px'>"
+        f"<span style='font-size:11px;color:#444'>{oi.get(coin,{}).get('signal','').replace('_',' ')}</span>"
+        f"<span style='font-size:12px;color:{"#2ecc71" if oi.get(coin,{}).get("change_24h",0)>0 else "#e74c3c"}'>"
+        f"{oi.get(coin,{}).get('change_24h',0):+.2f}% 24h</span></div></div>"
+        for coin in ["BTC","ETH"]
+    )}
+
+    <!-- HOW TO READ -->
+    <div class="section-title" style="margin-top:16px">📖 How to Read This</div>
+    <div style="background:#0d0d0d;border-radius:8px;padding:12px;font-size:11px;color:#444;line-height:2">
+      <b style="color:#666">F&G 0-25:</b> Extreme Fear — historically good to buy<br>
+      <b style="color:#666">F&G 75+:</b> Extreme Greed — high risk, consider selling<br>
+      <b style="color:#666">Funding +:</b> Longs crowded → risk of long squeeze<br>
+      <b style="color:#666">Funding -:</b> Shorts crowded → risk of short squeeze<br>
+      <b style="color:#666">OI Rising:</b> New money in → momentum likely continues<br>
+      <b style="color:#666">OI Falling:</b> Money leaving → trend may be ending<br>
+      <b style="color:#666">Whale to exchange:</b> Potential sell pressure incoming<br>
+      <b style="color:#666">Whale from exchange:</b> Accumulation — bullish signal<br>
+      <b style="color:#666">DXY rising:</b> Dollar strong → usually bad for crypto<br>
+      <b style="color:#666">DXY falling:</b> Dollar weak → usually good for crypto
+    </div>
+
+    <div style="margin-top:12px;font-size:10px;color:#222;text-align:center;line-height:1.8">
+      Sources: CryptoPanic · Alternative.me · Coinglass<br>
+      Whale Alert · Reuters · TradingEconomics · CoinGecko · Stooq<br>
+      All free public APIs · Refreshes every 2 minutes
+    </div>
+
+  </div>
+</div>
+</body></html>"""
+    return HTMLResponse(html)
+
+
+
 
 @app.get("/health")
 def health():
