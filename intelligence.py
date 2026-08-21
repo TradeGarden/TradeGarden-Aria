@@ -1,39 +1,32 @@
 """
-intelligence.py - Aria Complete Intelligence Engine
-====================================================
-All free public APIs, no keys required.
+intelligence.py - Aria Intelligence Engine
+==========================================
+Market regime scoring for BTC and ETH.
+Feeds into trading decisions AND intelligence page.
 
-Sources:
-  1. Fear & Greed       - alternative.me
-  2. Crypto News        - cryptopanic.com + rss2json
-  3. Funding Rates      - coinglass.com
-  4. Open Interest      - coinglass.com
-  5. Liquidations       - coinglass.com
-  6. Long/Short Ratio   - coinglass.com
-  7. Whale Transactions - whale-alert via rss2json
-  8. Exchange Flows     - coinglass.com
-  9. Economic Calendar  - tradingeconomics rss
- 10. Global Market Data - DXY, Gold, Nasdaq via stooq
- 11. BTC Dominance      - coingecko
- 12. Crypto Total MCap  - coingecko
+INTELLIGENCE SCORE: 0-100
+Bullish: market expansion, fear, momentum, structure, flows
+Bearish: DXY strength, liquidations, funding overload, news
+
+All free APIs - no keys needed.
 """
 
 import requests
 from datetime import datetime, timezone
 
-T = 12  # request timeout seconds
+T = 10  # timeout seconds
 
 
-def _get(url, params=None, headers=None) -> dict:
+def _get(url, params=None):
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=T)
+        r = requests.get(url, params=params, timeout=T)
         r.raise_for_status()
         return r.json()
     except Exception:
         return {}
 
 
-def _rss(url: str, count: int = 20) -> list:
+def _rss(url, count=20):
     try:
         r = requests.get(
             "https://api.rss2json.com/v1/api.json",
@@ -45,93 +38,123 @@ def _rss(url: str, count: int = 20) -> list:
         return []
 
 
-# ══════════════════════════════════════════════
-#  1. FEAR & GREED
-# ══════════════════════════════════════════════
+# ── Fear & Greed ──────────────────────────────────────────────────────────
 
 def get_fear_greed() -> dict:
     try:
-        data = _get("https://api.alternative.me/fng/?limit=3")
+        data  = _get("https://api.alternative.me/fng/?limit=2")
         items = data.get("data", [])
         if items:
-            cur = items[0]
-            val = int(cur["value"])
+            cur  = items[0]
+            val  = int(cur["value"])
             prev = int(items[1]["value"]) if len(items) > 1 else val
             return {
-                "value":     val,
-                "label":     cur["value_classification"],
-                "previous":  prev,
-                "change":    val - prev,
-                "signal":    ("EXTREME_FEAR" if val <= 25 else
-                              "FEAR"         if val <= 45 else
-                              "NEUTRAL"      if val <= 55 else
-                              "GREED"        if val <= 75 else
-                              "EXTREME_GREED"),
+                "value":    val,
+                "label":    cur["value_classification"],
+                "previous": prev,
+                "change":   val - prev,
+                "signal":   ("EXTREME_FEAR"  if val <= 25 else
+                             "FEAR"          if val <= 45 else
+                             "NEUTRAL"       if val <= 55 else
+                             "GREED"         if val <= 75 else
+                             "EXTREME_GREED"),
             }
     except Exception:
         pass
-    return {"value": 50, "label": "Neutral", "previous": 50,
+    return {"value": 50, "label": "N/A", "previous": 50,
             "change": 0, "signal": "NEUTRAL"}
 
 
-# ══════════════════════════════════════════════
-#  2. CRYPTO NEWS (BTC + ETH)
-# ══════════════════════════════════════════════
+# ── Global markets ────────────────────────────────────────────────────────
 
-def get_crypto_news(limit: int = 30) -> list:
+def get_global_markets() -> dict:
+    out = {
+        "btc_dominance": 0, "eth_dominance": 0,
+        "total_mcap_usd": 0, "mcap_change_24h": 0,
+        "dxy_price": 0, "dxy_change": 0,
+        "dxy_available": False,
+    }
+    try:
+        data = _get("https://api.coingecko.com/api/v3/global")
+        d    = data.get("data", {})
+        out["btc_dominance"]   = round(d.get("market_cap_percentage",{}).get("btc",0), 1)
+        out["eth_dominance"]   = round(d.get("market_cap_percentage",{}).get("eth",0), 1)
+        out["total_mcap_usd"]  = round(d.get("total_market_cap",{}).get("usd",0)/1e12, 2)
+        out["mcap_change_24h"] = round(d.get("market_cap_change_percentage_24h_usd",0), 2)
+    except Exception:
+        pass
+
+    # DXY
+    try:
+        r = requests.get("https://stooq.com/q/l/?s=dxy&f=sd2t2ohlcv&h&e=csv", timeout=T)
+        lines = r.text.strip().split("\n")
+        if len(lines) > 1:
+            parts = lines[-1].split(",")
+            if len(parts) >= 5:
+                price = float(parts[4])
+                open_ = float(parts[2])
+                if price > 50:  # sanity check - DXY is usually 90-115
+                    out["dxy_price"]     = price
+                    out["dxy_change"]    = round(price - open_, 3)
+                    out["dxy_available"] = True
+    except Exception:
+        pass
+
+    return out
+
+
+# ── Crypto news ───────────────────────────────────────────────────────────
+
+def get_crypto_news(symbol: str = "BTCUSD", limit: int = 30) -> list:
+    coin = "BTC" if "BTC" in symbol else "ETH"
     news = []
 
-    # Source 1: CryptoPanic free
-    for coin in ["BTC", "ETH"]:
-        try:
-            r = requests.get(
-                "https://cryptopanic.com/api/free/v1/posts/",
-                params={"auth_token": "free", "currencies": coin,
-                        "kind": "news", "public": "true"},
-                timeout=T,
-            )
-            if r.status_code == 200:
-                for p in r.json().get("results", [])[:10]:
-                    votes = p.get("votes", {})
-                    bull  = votes.get("positive", 0)
-                    bear  = votes.get("negative", 0)
-                    sent  = ("BULLISH" if bull > bear * 1.3
-                             else "BEARISH" if bear > bull * 1.3
-                             else "NEUTRAL")
-                    news.append({
-                        "title":     p.get("title", ""),
-                        "url":       p.get("url", ""),
-                        "source":    p.get("source", {}).get("title", ""),
-                        "coin":      coin,
-                        "sentiment": sent,
-                        "important": bool(p.get("is_important")),
-                        "published": p.get("published_at", "")[:16],
-                        "votes_bull": bull,
-                        "votes_bear": bear,
-                    })
-        except Exception:
-            pass
+    # CryptoPanic
+    try:
+        r = requests.get(
+            "https://cryptopanic.com/api/free/v1/posts/",
+            params={"auth_token": "free", "currencies": coin,
+                    "kind": "news", "public": "true"},
+            timeout=T,
+        )
+        if r.status_code == 200:
+            for p in r.json().get("results", [])[:15]:
+                votes = p.get("votes", {})
+                bull  = votes.get("positive", 0)
+                bear  = votes.get("negative", 0)
+                sent  = ("BULLISH" if bull > bear * 1.3
+                         else "BEARISH" if bear > bull * 1.3
+                         else "NEUTRAL")
+                news.append({
+                    "title":     p.get("title", ""),
+                    "url":       p.get("url", ""),
+                    "source":    p.get("source", {}).get("title", ""),
+                    "coin":      coin,
+                    "sentiment": sent,
+                    "important": bool(p.get("is_important")),
+                    "published": p.get("published_at", "")[:16],
+                })
+    except Exception:
+        pass
 
-    # Source 2: CoinDesk RSS fallback
+    # CoinDesk RSS fallback
     if len(news) < 5:
-        for item in _rss("https://www.coindesk.com/arc/outboundfeeds/rss/", 20):
+        for item in _rss("https://www.coindesk.com/arc/outboundfeeds/rss/", 15):
             title = item.get("title", "")
-            coin  = "BTC" if "bitcoin" in title.lower() or "btc" in title.lower() else \
-                    "ETH" if "ethereum" in title.lower() or "eth" in title.lower() else "CRYPTO"
-            news.append({
-                "title":     title,
-                "url":       item.get("link", ""),
-                "source":    "CoinDesk",
-                "coin":      coin,
-                "sentiment": "NEUTRAL",
-                "important": False,
-                "published": item.get("pubDate", "")[:16],
-                "votes_bull": 0,
-                "votes_bear": 0,
-            })
+            if coin in title.upper() or ("BITCOIN" in title.upper() and coin=="BTC") \
+               or ("ETHEREUM" in title.upper() and coin=="ETH"):
+                news.append({
+                    "title":     title,
+                    "url":       item.get("link", ""),
+                    "source":    "CoinDesk",
+                    "coin":      coin,
+                    "sentiment": "NEUTRAL",
+                    "important": False,
+                    "published": item.get("pubDate", "")[:16],
+                })
 
-    # Source 3: Decrypt RSS
-    if len(news) < 10:
+    # Decrypt RSS
+    if len(news) < 8:
         for item in _rss("https://decrypt.co/feed", 15):
             title = item.get("title", "")
             news.append({
@@ -142,44 +165,77 @@ def get_crypto_news(limit: int = 30) -> list:
                 "sentiment": "NEUTRAL",
                 "important": False,
                 "published": item.get("pubDate", "")[:16],
-                "votes_bull": 0,
-                "votes_bear": 0,
             })
 
     # Deduplicate
     seen, unique = set(), []
     for n in news:
-        key = n["title"][:50]
-        if key not in seen:
+        key = n["title"][:40]
+        if key and key not in seen:
             seen.add(key)
             unique.append(n)
 
     return unique[:limit]
 
 
-# ══════════════════════════════════════════════
-#  3. FUNDING RATES
-# ══════════════════════════════════════════════
+# ── Whale transactions ────────────────────────────────────────────────────
 
-def get_funding_rates() -> dict:
-    result = {}
-    for coin in ["BTC", "ETH"]:
-        try:
-            data = _get("https://open-api.coinglass.com/public/v2/funding",
-                        params={"symbol": coin})
-            items = data.get("data", [])
-            rates = {}
-            total = 0.0
-            count = 0
+def get_whale_transactions(symbol: str = "BTCUSD") -> list:
+    coin   = "BTC" if "BTC" in symbol else "ETH"
+    whales = []
+
+    for item in _rss("https://whale-alert.io/rss/all", 25):
+        title = item.get("title", "")
+        if not title:
+            continue
+        tu = title.upper()
+        if coin not in tu and ("BITCOIN" not in tu or coin != "BTC") \
+           and ("ETHEREUM" not in tu or coin != "ETH"):
+            continue
+
+        tl = title.lower()
+        direction = (
+            "TO_EXCHANGE"    if any(x in tl for x in ["to coinbase","to binance","to kraken","to huobi","to okx","to exchange"]) else
+            "FROM_EXCHANGE"  if any(x in tl for x in ["from coinbase","from binance","from kraken","from exchange"]) else
+            "WALLET_TO_WALLET"
+        )
+        signal = ("BEARISH" if direction=="TO_EXCHANGE"
+                  else "BULLISH" if direction=="FROM_EXCHANGE"
+                  else "NEUTRAL")
+
+        whales.append({
+            "title":     title,
+            "url":       item.get("link",""),
+            "coin":      coin,
+            "direction": direction,
+            "signal":    signal,
+            "published": item.get("pubDate","")[:16],
+        })
+
+    return whales[:15]
+
+
+# ── Funding rates ─────────────────────────────────────────────────────────
+
+def get_funding_rates(symbol: str = "BTCUSD") -> dict:
+    coin = "BTC" if "BTC" in symbol else "ETH"
+    try:
+        data  = _get("https://open-api.coinglass.com/public/v2/funding",
+                     params={"symbol": coin})
+        items = data.get("data", [])
+        if items:
+            rates  = {}
+            total  = 0.0
+            count  = 0
             for ex in items:
                 rate = float(ex.get("rate", 0))
-                rates[ex.get("exchangeName", "?")] = round(rate * 100, 4)
+                rates[ex.get("exchangeName","?")] = round(rate*100, 4)
                 total += rate
                 count += 1
-            avg = total / count if count else 0
-            result[coin] = {
-                "average":    round(avg * 100, 4),
-                "annualized": round(avg * 3 * 365 * 100, 1),
+            avg = total/count if count else 0
+            return {
+                "average":    round(avg*100, 4),
+                "annualized": round(avg*3*365*100, 1),
                 "exchanges":  rates,
                 "signal": ("OVERHEATED_LONGS"  if avg >  0.0005 else
                            "LONGS_DOMINANT"    if avg >  0.0001 else
@@ -187,356 +243,309 @@ def get_funding_rates() -> dict:
                            "SHORTS_DOMINANT"   if avg < -0.0001 else
                            "NEUTRAL"),
             }
-        except Exception:
-            result[coin] = {"average": 0, "annualized": 0,
-                            "exchanges": {}, "signal": "NEUTRAL"}
-    return result
+    except Exception:
+        pass
+    return {"average": 0, "annualized": 0, "exchanges": {}, "signal": "NEUTRAL"}
 
 
-# ══════════════════════════════════════════════
-#  4. OPEN INTEREST
-# ══════════════════════════════════════════════
+# ── Open interest ─────────────────────────────────────────────────────────
 
-def get_open_interest() -> dict:
-    result = {}
-    for coin in ["BTC", "ETH"]:
-        try:
-            data = _get("https://open-api.coinglass.com/public/v2/open_interest",
-                        params={"symbol": coin})
-            d = data.get("data", {})
-            oi  = float(d.get("openInterest", 0))
-            chg = float(d.get("openInterestChange24h", 0))
-            result[coin] = {
-                "value_usd":    round(oi / 1e9, 2),
-                "change_24h":   round(chg, 2),
-                "signal": ("STRONG_EXPANSION"   if chg >  5 else
-                           "EXPANDING"          if chg >  2 else
-                           "STRONG_CONTRACTION" if chg < -5 else
-                           "CONTRACTING"        if chg < -2 else
-                           "STABLE"),
-            }
-        except Exception:
-            result[coin] = {"value_usd": 0, "change_24h": 0, "signal": "STABLE"}
-    return result
+def get_open_interest(symbol: str = "BTCUSD") -> dict:
+    coin = "BTC" if "BTC" in symbol else "ETH"
+    try:
+        data = _get("https://open-api.coinglass.com/public/v2/open_interest",
+                    params={"symbol": coin})
+        d    = data.get("data", {})
+        oi   = float(d.get("openInterest", 0))
+        chg  = float(d.get("openInterestChange24h", 0))
+        return {
+            "value_usd":  round(oi/1e9, 2),
+            "change_24h": round(chg, 2),
+            "signal": ("STRONG_EXPANSION"   if chg >  5 else
+                       "EXPANDING"          if chg >  2 else
+                       "STRONG_CONTRACTION" if chg < -5 else
+                       "CONTRACTING"        if chg < -2 else
+                       "STABLE"),
+        }
+    except Exception:
+        return {"value_usd": 0, "change_24h": 0, "signal": "STABLE"}
 
 
-# ══════════════════════════════════════════════
-#  5. LIQUIDATIONS
-# ══════════════════════════════════════════════
+# ── Liquidations ──────────────────────────────────────────────────────────
 
-def get_liquidations() -> dict:
-    result = {}
-    for coin in ["BTC", "ETH"]:
-        try:
-            data = _get("https://open-api.coinglass.com/public/v2/liquidation_ex",
-                        params={"symbol": coin, "interval": "1h"})
-            d = data.get("data", {})
-            longs  = float(d.get("longLiquidationUsd", 0))
-            shorts = float(d.get("shortLiquidationUsd", 0))
-            result[coin] = {
-                "longs_1h":  round(longs  / 1e6, 2),
-                "shorts_1h": round(shorts / 1e6, 2),
-                "dominant":  "LONGS_LIQUIDATED" if longs > shorts * 1.5
-                             else "SHORTS_LIQUIDATED" if shorts > longs * 1.5
-                             else "BALANCED",
-                "signal": ("BEARISH" if longs > shorts * 1.5
-                           else "BULLISH" if shorts > longs * 1.5
-                           else "NEUTRAL"),
-            }
-        except Exception:
-            result[coin] = {"longs_1h": 0, "shorts_1h": 0,
-                            "dominant": "BALANCED", "signal": "NEUTRAL"}
-    return result
+def get_liquidations(symbol: str = "BTCUSD") -> dict:
+    coin = "BTC" if "BTC" in symbol else "ETH"
+    try:
+        data   = _get("https://open-api.coinglass.com/public/v2/liquidation_ex",
+                      params={"symbol": coin, "interval": "1h"})
+        d      = data.get("data", {})
+        longs  = float(d.get("longLiquidationUsd", 0))
+        shorts = float(d.get("shortLiquidationUsd", 0))
+        return {
+            "longs_1h":  round(longs/1e6, 2),
+            "shorts_1h": round(shorts/1e6, 2),
+            "signal": ("BEARISH" if longs > shorts*1.5
+                       else "BULLISH" if shorts > longs*1.5
+                       else "NEUTRAL"),
+        }
+    except Exception:
+        return {"longs_1h": 0, "shorts_1h": 0, "signal": "NEUTRAL"}
 
 
-# ══════════════════════════════════════════════
-#  6. LONG / SHORT RATIO
-# ══════════════════════════════════════════════
-
-def get_long_short_ratio() -> dict:
-    result = {}
-    for coin in ["BTC", "ETH"]:
-        try:
-            data = _get("https://open-api.coinglass.com/public/v2/global_long_short_account_ratio",
-                        params={"symbol": coin, "interval": "1h", "limit": 1})
-            items = data.get("data", [])
-            if items:
-                ls = items[-1]
-                ratio = float(ls.get("longShortRatio", 1))
-                longs = float(ls.get("longAccount", 50))
-                result[coin] = {
-                    "ratio":  round(ratio, 3),
-                    "longs":  round(longs, 1),
-                    "shorts": round(100 - longs, 1),
-                    "signal": ("CROWDED_LONGS"  if longs > 65 else
-                               "CROWDED_SHORTS" if longs < 35 else
-                               "BALANCED"),
-                }
-                continue
-        except Exception:
-            pass
-        result[coin] = {"ratio": 1.0, "longs": 50, "shorts": 50, "signal": "BALANCED"}
-    return result
-
-
-# ══════════════════════════════════════════════
-#  7. WHALE TRANSACTIONS
-# ══════════════════════════════════════════════
-
-def get_whale_transactions() -> list:
-    whales = []
-
-    # Whale Alert RSS (free public feed)
-    items = _rss("https://whale-alert.io/rss/all", 20)
-    for item in items:
-        title = item.get("title", "")
-        if not title:
-            continue
-        # Parse: "999 #BTC transferred from unknown to Coinbase"
-        coin = "BTC" if "BTC" in title.upper() or "BITCOIN" in title.upper() \
-               else "ETH" if "ETH" in title.upper() or "ETHEREUM" in title.upper() \
-               else None
-        if not coin:
-            continue
-
-        # Determine direction
-        title_l = title.lower()
-        direction = ("TO_EXCHANGE"   if "to coinbase" in title_l or
-                                        "to binance" in title_l or
-                                        "to kraken" in title_l or
-                                        "to exchange" in title_l
-                     else "FROM_EXCHANGE" if "from coinbase" in title_l or
-                                            "from binance" in title_l or
-                                            "from exchange" in title_l
-                     else "WALLET_TO_WALLET")
-
-        signal = ("BEARISH" if direction == "TO_EXCHANGE"
-                  else "BULLISH" if direction == "FROM_EXCHANGE"
-                  else "NEUTRAL")
-
-        whales.append({
-            "title":     title,
-            "url":       item.get("link", ""),
-            "coin":      coin,
-            "direction": direction,
-            "signal":    signal,
-            "published": item.get("pubDate", "")[:16],
-        })
-
-    return whales[:15]
-
-
-# ══════════════════════════════════════════════
-#  8. EXCHANGE FLOWS (BTC)
-# ══════════════════════════════════════════════
-
-def get_exchange_flows() -> dict:
-    result = {}
-    for coin in ["BTC", "ETH"]:
-        try:
-            data = _get("https://open-api.coinglass.com/public/v2/exchange_flows",
-                        params={"symbol": coin})
-            d = data.get("data", {})
-            inflow  = float(d.get("inflow24h",  0))
-            outflow = float(d.get("outflow24h", 0))
-            net     = outflow - inflow
-            result[coin] = {
-                "inflow_24h":  round(inflow  / 1e6, 2),
-                "outflow_24h": round(outflow / 1e6, 2),
-                "net_flow":    round(net     / 1e6, 2),
-                "signal": ("BULLISH" if net >  50 else
-                           "BEARISH" if net < -50 else
-                           "NEUTRAL"),
-                "interpretation": (
-                    "More BTC leaving exchanges — holders accumulating" if net > 50
-                    else "More BTC entering exchanges — potential selling pressure" if net < -50
-                    else "Balanced flow"
-                ),
-            }
-        except Exception:
-            result[coin] = {"inflow_24h": 0, "outflow_24h": 0,
-                            "net_flow": 0, "signal": "NEUTRAL",
-                            "interpretation": "Data unavailable"}
-    return result
-
-
-# ══════════════════════════════════════════════
-#  9. ECONOMIC CALENDAR
-# ══════════════════════════════════════════════
+# ── Economic events ───────────────────────────────────────────────────────
 
 def get_economic_events() -> list:
-    HIGH_IMPACT = ["CPI","FOMC","NFP","GDP","PPI","INTEREST RATE",
-                   "FED","POWELL","INFLATION","UNEMPLOYMENT","PAYROLL",
-                   "RATE DECISION","JEROME","YELLEN","TREASURY",
-                   "TARIFF","TRUMP","CRYPTO REGULATION","SEC","ETF"]
+    HIGH = ["CPI","FOMC","NFP","GDP","PPI","INTEREST RATE","FED",
+            "POWELL","INFLATION","UNEMPLOYMENT","PAYROLL","TARIFF",
+            "TRUMP","CRYPTO REGULATION","SEC","ETF","BITCOIN","ETHEREUM"]
     events = []
-
-    # TradingEconomics RSS
     for item in _rss("https://tradingeconomics.com/rss/news.aspx", 30):
-        title = item.get("title", "")
-        if any(k in title.upper() for k in HIGH_IMPACT):
+        title = item.get("title","")
+        if any(k in title.upper() for k in HIGH):
             events.append({
                 "title":     title,
-                "url":       item.get("link", ""),
+                "url":       item.get("link",""),
                 "source":    "TradingEconomics",
                 "impact":    "HIGH",
-                "published": item.get("pubDate", "")[:16],
+                "published": item.get("pubDate","")[:16],
             })
-
-    # Reuters RSS for macro
-    for item in _rss("https://feeds.reuters.com/reuters/businessNews", 20):
-        title = item.get("title", "")
-        if any(k in title.upper() for k in HIGH_IMPACT):
+    for item in _rss("https://feeds.reuters.com/reuters/businessNews", 15):
+        title = item.get("title","")
+        if any(k in title.upper() for k in HIGH):
             events.append({
                 "title":     title,
-                "url":       item.get("link", ""),
+                "url":       item.get("link",""),
                 "source":    "Reuters",
                 "impact":    "HIGH",
-                "published": item.get("pubDate", "")[:16],
+                "published": item.get("pubDate","")[:16],
             })
-
-    # Deduplicate
-    seen, unique = set(), []
+    seen, out = set(), []
     for e in events:
-        key = e["title"][:40]
-        if key not in seen:
-            seen.add(key)
-            unique.append(e)
-
-    return unique[:10]
-
-
-# ══════════════════════════════════════════════
-#  10. GLOBAL MARKET DATA
-# ══════════════════════════════════════════════
-
-def get_global_markets() -> dict:
-    markets = {}
-
-    # CoinGecko for BTC dominance + total market cap
-    try:
-        data = _get("https://api.coingecko.com/api/v3/global")
-        d = data.get("data", {})
-        markets["btc_dominance"]   = round(d.get("market_cap_percentage", {}).get("btc", 0), 1)
-        markets["eth_dominance"]   = round(d.get("market_cap_percentage", {}).get("eth", 0), 1)
-        markets["total_mcap_usd"]  = round(d.get("total_market_cap",{}).get("usd", 0) / 1e12, 2)
-        markets["mcap_change_24h"] = round(d.get("market_cap_change_percentage_24h_usd", 0), 2)
-        markets["active_cryptos"]  = d.get("active_cryptocurrencies", 0)
-        markets["btc_dominance_signal"] = ("HIGH_DOMINANCE" if markets["btc_dominance"] > 55
-                                           else "LOW_DOMINANCE" if markets["btc_dominance"] < 40
-                                           else "NORMAL")
-    except Exception:
-        markets.update({"btc_dominance": 0, "eth_dominance": 0,
-                        "total_mcap_usd": 0, "mcap_change_24h": 0,
-                        "active_cryptos": 0, "btc_dominance_signal": "NORMAL"})
-
-    # Stooq for DXY (dollar index)
-    try:
-        r = requests.get("https://stooq.com/q/l/?s=dxy&f=sd2t2ohlcv&h&e=csv",
-                         timeout=T)
-        lines = r.text.strip().split("\n")
-        if len(lines) > 1:
-            parts = lines[-1].split(",")
-            if len(parts) >= 5:
-                markets["dxy_price"]  = float(parts[4])
-                markets["dxy_open"]   = float(parts[2])
-                markets["dxy_change"] = round(float(parts[4]) - float(parts[2]), 3)
-                markets["dxy_signal"] = ("BEARISH_DXY" if markets["dxy_change"] < -0.2
-                                         else "BULLISH_DXY" if markets["dxy_change"] > 0.2
-                                         else "NEUTRAL")
-    except Exception:
-        markets.update({"dxy_price": 0, "dxy_open": 0,
-                        "dxy_change": 0, "dxy_signal": "NEUTRAL"})
-
-    return markets
+        k = e["title"][:40]
+        if k not in seen:
+            seen.add(k)
+            out.append(e)
+    return out[:8]
 
 
 # ══════════════════════════════════════════════
-#  INTELLIGENCE SCORE (adds to confidence)
+#  MARKET REGIME SCORE
+#  The core intelligence signal: 0-100
 # ══════════════════════════════════════════════
 
-def intelligence_score(intel: dict, side: str) -> int:
-    if not intel:
-        return 0
-    score  = 0
-    is_buy = side == "BUY"
+def calc_regime_score(
+    fg: dict, markets: dict, funding: dict, oi: dict,
+    liq: dict, news: list, whales: list, events: list, symbol: str
+) -> dict:
+    """
+    Score the market from 0-100.
+    0-35  = BEARISH
+    36-55 = NEUTRAL
+    56-70 = BULLISH
+    71-100 = STRONGLY BULLISH
 
-    fg = intel.get("fear_greed", {}).get("signal", "NEUTRAL")
-    if is_buy  and fg == "EXTREME_FEAR":   score += 6
-    elif is_buy  and fg == "FEAR":         score += 3
-    elif not is_buy and fg == "EXTREME_GREED": score += 6
-    elif not is_buy and fg == "GREED":         score += 3
+    Bullish factors add points, bearish factors subtract.
+    Base is 50 (neutral).
+    """
+    score    = 50
+    drivers  = []
+    risks    = []
+    bull_pts = 0
+    bear_pts = 0
 
-    fund = intel.get("funding", {}).get("BTC", {}).get("signal", "NEUTRAL")
-    if is_buy  and fund == "OVERHEATED_SHORTS": score += 5
-    elif is_buy  and fund == "SHORTS_DOMINANT": score += 2
-    elif not is_buy and fund == "OVERHEATED_LONGS": score += 5
-    elif not is_buy and fund == "LONGS_DOMINANT":   score += 2
+    # 1. Fear & Greed (max ±15pts)
+    fgv = fg.get("value", 50)
+    fgs = fg.get("signal","NEUTRAL")
+    if fgs == "EXTREME_FEAR":
+        score += 12; bull_pts += 12
+        drivers.append("Extreme Fear — historically bullish contrarian signal")
+    elif fgs == "FEAR":
+        score += 6;  bull_pts += 6
+        drivers.append("Market fear — mild bullish bias")
+    elif fgs == "EXTREME_GREED":
+        score -= 12; bear_pts += 12
+        risks.append("Extreme Greed — elevated reversal risk")
+    elif fgs == "GREED":
+        score -= 6;  bear_pts += 6
+        risks.append("Elevated greed — watch for pullback")
 
-    news = intel.get("news", [])
-    bull = sum(1 for n in news if n.get("sentiment") == "BULLISH")
-    bear = sum(1 for n in news if n.get("sentiment") == "BEARISH")
-    if is_buy  and bull > bear: score += min(4, bull)
-    if not is_buy and bear > bull: score += min(4, bear)
+    # 2. Market cap expansion (max +10pts)
+    mcap_chg = markets.get("mcap_change_24h", 0)
+    if mcap_chg > 5:
+        score += 10; bull_pts += 10
+        drivers.append(f"Total market cap expanding strongly (+{mcap_chg:.1f}%)")
+    elif mcap_chg > 2:
+        score += 5;  bull_pts += 5
+        drivers.append(f"Market cap growing (+{mcap_chg:.1f}%)")
+    elif mcap_chg < -5:
+        score -= 10; bear_pts += 10
+        risks.append(f"Market cap contracting ({mcap_chg:.1f}%)")
+    elif mcap_chg < -2:
+        score -= 5;  bear_pts += 5
+        risks.append(f"Market cap declining ({mcap_chg:.1f}%)")
 
-    liq = intel.get("liquidations", {}).get("BTC", {}).get("signal", "NEUTRAL")
-    if is_buy  and liq == "BULLISH": score += 5
-    if not is_buy and liq == "BEARISH": score += 5
+    # 3. DXY (max ±10pts) — strong dollar = bad for crypto
+    if markets.get("dxy_available"):
+        dxy_chg = markets.get("dxy_change", 0)
+        if dxy_chg < -0.3:
+            score += 8; bull_pts += 8
+            drivers.append(f"DXY weakening ({dxy_chg:+.2f}) — risk-on for crypto")
+        elif dxy_chg < -0.1:
+            score += 4; bull_pts += 4
+        elif dxy_chg > 0.3:
+            score -= 8; bear_pts += 8
+            risks.append(f"DXY strengthening ({dxy_chg:+.2f}) — risk-off for crypto")
+        elif dxy_chg > 0.1:
+            score -= 4; bear_pts += 4
 
-    return min(score, 20)
+    # 4. Funding rates (max ±10pts)
+    fund_sig = funding.get("signal","NEUTRAL")
+    if fund_sig == "OVERHEATED_LONGS":
+        score -= 10; bear_pts += 10
+        risks.append("Funding overheated — longs very crowded, risk of flush")
+    elif fund_sig == "LONGS_DOMINANT":
+        score -= 4;  bear_pts += 4
+        risks.append("Longs dominant in funding")
+    elif fund_sig == "OVERHEATED_SHORTS":
+        score += 10; bull_pts += 10
+        drivers.append("Shorts overheated — short squeeze potential")
+    elif fund_sig == "SHORTS_DOMINANT":
+        score += 4;  bull_pts += 4
+        drivers.append("Shorts dominant — potential squeeze")
+
+    # 5. Open interest (max ±8pts)
+    oi_sig = oi.get("signal","STABLE")
+    if oi_sig == "STRONG_EXPANSION":
+        score += 8; bull_pts += 8
+        drivers.append(f"Open interest expanding strongly (+{oi.get('change_24h',0):.1f}%)")
+    elif oi_sig == "EXPANDING":
+        score += 4; bull_pts += 4
+        drivers.append("Open interest growing — new money entering")
+    elif oi_sig == "STRONG_CONTRACTION":
+        score -= 8; bear_pts += 8
+        risks.append("Open interest collapsing — money leaving market")
+    elif oi_sig == "CONTRACTING":
+        score -= 4; bear_pts += 4
+
+    # 6. Liquidations (max ±8pts)
+    liq_sig = liq.get("signal","NEUTRAL")
+    if liq_sig == "BULLISH":
+        score += 6; bull_pts += 6
+        drivers.append(f"Short liquidations dominant (${liq.get('shorts_1h',0):.1f}M)")
+    elif liq_sig == "BEARISH":
+        score -= 6; bear_pts += 6
+        risks.append(f"Long liquidations dominant (${liq.get('longs_1h',0):.1f}M)")
+
+    # 7. News sentiment (max ±8pts)
+    bull_news = sum(1 for n in news if n.get("sentiment")=="BULLISH")
+    bear_news = sum(1 for n in news if n.get("sentiment")=="BEARISH")
+    imp_news  = sum(1 for n in news if n.get("important"))
+    if bull_news > bear_news + 2:
+        pts = min(8, bull_news * 2)
+        score += pts; bull_pts += pts
+        drivers.append(f"News sentiment bullish ({bull_news} bullish vs {bear_news} bearish)")
+    elif bear_news > bull_news + 2:
+        pts = min(8, bear_news * 2)
+        score -= pts; bear_pts += pts
+        risks.append(f"News sentiment bearish ({bear_news} bearish vs {bull_news} bullish)")
+    if imp_news > 0:
+        risks.append(f"{imp_news} high-impact news event(s) — increased volatility")
+
+    # 8. Whale transactions (max ±6pts)
+    bull_whales = sum(1 for w in whales if w.get("signal")=="BULLISH")
+    bear_whales = sum(1 for w in whales if w.get("signal")=="BEARISH")
+    if bull_whales > bear_whales:
+        score += min(6, bull_whales * 2); bull_pts += min(6, bull_whales * 2)
+        drivers.append(f"{bull_whales} whale withdrawals from exchanges — accumulation")
+    elif bear_whales > bull_whales:
+        score -= min(6, bear_whales * 2); bear_pts += min(6, bear_whales * 2)
+        risks.append(f"{bear_whales} whale deposits to exchanges — potential sell pressure")
+
+    # 9. High impact events (warning)
+    if events:
+        risks.append(f"{len(events)} high-impact economic event(s) today — expect volatility")
+
+    # Clamp score
+    score = max(0, min(100, score))
+
+    # Determine regime
+    if score >= 71:   regime = "STRONGLY BULLISH"
+    elif score >= 56: regime = "BULLISH"
+    elif score >= 45: regime = "NEUTRAL"
+    elif score >= 30: regime = "BEARISH"
+    else:             regime = "STRONGLY BEARISH"
+
+    # Primary driver
+    primary = drivers[0] if drivers else "No strong directional signal"
+
+    # Invalidation condition
+    coin  = "BTC" if "BTC" in symbol else "ETH"
+    inval = (f"{coin} loses key 4H market structure" if score >= 56
+             else f"{coin} breaks above key resistance" if score <= 45
+             else "No clear invalidation identified")
+
+    # Confidence
+    total_pts  = bull_pts + bear_pts
+    confidence = round(min(95, 50 + (abs(bull_pts - bear_pts) / max(total_pts,1)) * 50), 0)
+
+    return {
+        "score":           score,
+        "regime":          regime,
+        "confidence":      int(confidence),
+        "primary_driver":  primary,
+        "risk":            risks[0] if risks else "No major risks identified",
+        "invalidation":    inval,
+        "bull_factors":    drivers,
+        "bear_factors":    risks,
+        "bull_pts":        bull_pts,
+        "bear_pts":        bear_pts,
+    }
 
 
 # ══════════════════════════════════════════════
-#  FULL SNAPSHOT
+#  FULL INTELLIGENCE SNAPSHOT
 # ══════════════════════════════════════════════
 
 def get_intelligence(symbol: str = "BTCUSD") -> dict:
-    """Full intelligence snapshot. All sources. Fails gracefully."""
+    """Complete intelligence snapshot for one symbol."""
     fg      = get_fear_greed()
-    news    = get_crypto_news(limit=30)
-    funding = get_funding_rates()
-    oi      = get_open_interest()
-    liq     = get_liquidations()
-    ls      = get_long_short_ratio()
-    whales  = get_whale_transactions()
-    flows   = get_exchange_flows()
-    events  = get_economic_events()
     markets = get_global_markets()
+    news    = get_crypto_news(symbol, limit=30)
+    funding = get_funding_rates(symbol)
+    oi      = get_open_interest(symbol)
+    liq     = get_liquidations(symbol)
+    whales  = get_whale_transactions(symbol)
+    events  = get_economic_events()
 
-    coin = "BTC" if "BTC" in symbol else "ETH"
-
-    # Overall signal
-    signals = []
-    if fg["signal"] in ("EXTREME_FEAR",):          signals.append("BULLISH")
-    if fg["signal"] in ("EXTREME_GREED",):         signals.append("BEARISH")
-    if funding.get(coin, {}).get("signal") == "OVERHEATED_SHORTS": signals.append("BULLISH")
-    if funding.get(coin, {}).get("signal") == "OVERHEATED_LONGS":  signals.append("BEARISH")
-    if liq.get(coin, {}).get("signal") == "BULLISH": signals.append("BULLISH")
-    if liq.get(coin, {}).get("signal") == "BEARISH": signals.append("BEARISH")
-    bull_n = sum(1 for n in news if n.get("sentiment") == "BULLISH")
-    bear_n = sum(1 for n in news if n.get("sentiment") == "BEARISH")
-    if bull_n > bear_n: signals.append("BULLISH")
-    if bear_n > bull_n: signals.append("BEARISH")
-
-    bull_count = signals.count("BULLISH")
-    bear_count = signals.count("BEARISH")
-    overall = ("BULLISH" if bull_count > bear_count
-               else "BEARISH" if bear_count > bull_count
-               else "NEUTRAL")
+    regime  = calc_regime_score(fg, markets, funding, oi,
+                                liq, news, whales, events, symbol)
 
     return {
-        "symbol":         symbol,
-        "fear_greed":     fg,
-        "news":           news,
-        "funding":        funding,
-        "open_interest":  oi,
-        "liquidations":   liq,
-        "long_short":     ls,
-        "whale_txns":     whales,
-        "exchange_flows": flows,
+        "symbol":        symbol,
+        "fear_greed":    fg,
+        "global_markets":markets,
+        "news":          news,
+        "funding":       funding,
+        "open_interest": oi,
+        "liquidations":  liq,
+        "whale_txns":    whales,
         "economic_events":events,
-        "global_markets": markets,
-        "overall_signal": overall,
+        "regime":        regime,
         "high_impact_event": len(events) > 0,
-        "timestamp":      datetime.now(timezone.utc).strftime("%H:%M UTC"),
+        "timestamp":     datetime.now(timezone.utc).strftime("%H:%M UTC"),
     }
+
+
+# ── Intelligence bonus score for trading ─────────────────────────────────
+
+def intelligence_score(intel: dict, side: str) -> int:
+    """0-15 bonus pts added to trade confidence from regime score."""
+    if not intel:
+        return 0
+    regime_score = intel.get("regime",{}).get("score", 50)
+    is_buy = side == "BUY"
+    if is_buy and regime_score >= 65:
+        return min(15, int((regime_score - 50) / 3))
+    if not is_buy and regime_score <= 35:
+        return min(15, int((50 - regime_score) / 3))
+    return 0
