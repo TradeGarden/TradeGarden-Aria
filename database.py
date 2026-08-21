@@ -1,6 +1,6 @@
 """
 database.py - PostgreSQL Persistent Storage
-All state lives here. Survives restarts, sleep cycles, redeploys.
+Handles missing columns gracefully with auto-migration.
 """
 import os, json, uuid
 from datetime import datetime
@@ -11,12 +11,13 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 def get_conn():
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL not set in Render environment.")
+        raise RuntimeError("DATABASE_URL not set.")
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def setup_database():
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # Account table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS account (
                     id         SERIAL PRIMARY KEY,
@@ -28,7 +29,10 @@ def setup_database():
                 INSERT INTO account (mode, balance, equity)
                 SELECT 'paper', 500.00, 500.00
                 WHERE NOT EXISTS (SELECT 1 FROM account WHERE id = 1);
+            """)
 
+            # Positions table - create fresh
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS positions (
                     id             SERIAL PRIMARY KEY,
                     trade_id       VARCHAR(20)   UNIQUE,
@@ -39,7 +43,7 @@ def setup_database():
                     risk_amount    NUMERIC(10,2),
                     stop_loss      NUMERIC(12,2),
                     take_profit    NUMERIC(12,2),
-                    rr             NUMERIC(5,2),
+                    rr             NUMERIC(5,2)  DEFAULT 1.0,
                     be_moved       BOOLEAN       DEFAULT FALSE,
                     trail_sl       BOOLEAN       DEFAULT FALSE,
                     partial_closed BOOLEAN       DEFAULT FALSE,
@@ -48,7 +52,25 @@ def setup_database():
                     opened_at      TIMESTAMP     DEFAULT NOW(),
                     status         VARCHAR(10)   DEFAULT 'OPEN'
                 );
+            """)
 
+            # Auto-add missing columns to existing positions table
+            missing_cols = [
+                ("partial_closed", "BOOLEAN DEFAULT FALSE"),
+                ("trade_mode",     "VARCHAR(10) DEFAULT 'SCALPER'"),
+                ("atr_at_open",    "NUMERIC(12,2) DEFAULT 0"),
+                ("trail_sl",       "BOOLEAN DEFAULT FALSE"),
+                ("be_moved",       "BOOLEAN DEFAULT FALSE"),
+                ("rr",             "NUMERIC(5,2) DEFAULT 1.0"),
+            ]
+            for col, definition in missing_cols:
+                try:
+                    cur.execute(f"ALTER TABLE positions ADD COLUMN IF NOT EXISTS {col} {definition}")
+                except Exception:
+                    pass
+
+            # Trade history
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS trade_history (
                     id           SERIAL PRIMARY KEY,
                     trade_id     VARCHAR(20),
@@ -64,39 +86,47 @@ def setup_database():
                     new_balance  NUMERIC(12,2),
                     duration     VARCHAR(20),
                     exit_reason  VARCHAR(200),
-                    confidence   INTEGER,
+                    confidence   INTEGER       DEFAULT 0,
                     session      VARCHAR(20),
                     trend        VARCHAR(20),
                     structure    VARCHAR(20),
-                    rsi          NUMERIC(6,2),
-                    trade_mode   VARCHAR(10),
+                    rsi          NUMERIC(6,2)  DEFAULT 0,
+                    trade_mode   VARCHAR(10)   DEFAULT 'SCALPER',
                     opened_at    TIMESTAMP,
-                    closed_at    TIMESTAMP DEFAULT NOW()
+                    closed_at    TIMESTAMP     DEFAULT NOW()
                 );
+            """)
 
+            # Journal
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS journal (
                     id         SERIAL PRIMARY KEY,
                     record_id  VARCHAR(20),
                     action     VARCHAR(20),
                     symbol     VARCHAR(10),
                     side       VARCHAR(5),
-                    price      NUMERIC(12,2),
-                    pl         NUMERIC(10,2),
+                    price      NUMERIC(12,2) DEFAULT 0,
+                    pl         NUMERIC(10,2) DEFAULT 0,
                     reason     TEXT,
                     data       JSONB,
-                    created_at TIMESTAMP DEFAULT NOW()
+                    created_at TIMESTAMP     DEFAULT NOW()
                 );
+            """)
 
+            # Price cache
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS price_cache (
                     symbol     VARCHAR(10) PRIMARY KEY,
                     price      NUMERIC(12,2),
                     updated_at TIMESTAMP DEFAULT NOW()
                 );
             """)
+
         conn.commit()
     print("[DB] Tables ready")
 
-# ── Account ──────────────────────────────────────────────────────────────
+
+# ── Account ───────────────────────────────────────────────────────────────
 
 def get_account() -> dict:
     with get_conn() as conn:
@@ -108,7 +138,7 @@ def get_account() -> dict:
                 d["balance"] = float(d.get("balance", 500.0))
                 d["equity"]  = float(d.get("equity",  500.0))
                 return d
-            return {"balance": 500.0, "equity": 500.0, "mode": "paper"}
+    return {"balance": 500.0, "equity": 500.0, "mode": "paper"}
 
 def load_balance() -> float:
     return float(get_account()["balance"])
@@ -144,16 +174,12 @@ def recalc_equity(prices: dict) -> float:
     update_equity(equity)
     return equity
 
+
 # ── Positions ─────────────────────────────────────────────────────────────
 
-def _normalize_pos(p: dict) -> dict:
-    p["entry_price"]    = float(p["entry_price"])
-    p["size"]           = float(p["size"])
-    p["risk_amount"]    = float(p["risk_amount"])
-    p["stop_loss"]      = float(p["stop_loss"])
-    p["take_profit"]    = float(p["take_profit"])
-    p["rr"]             = float(p["rr"])
-    p["atr_at_open"]    = float(p.get("atr_at_open") or 0)
+def _normalize(p: dict) -> dict:
+    for f in ["entry_price","size","risk_amount","stop_loss","take_profit","rr","atr_at_open"]:
+        p[f] = float(p.get(f) or 0)
     p["be_moved"]       = bool(p.get("be_moved", False))
     p["trail_sl"]       = bool(p.get("trail_sl", False))
     p["partial_closed"] = bool(p.get("partial_closed", False))
@@ -183,9 +209,12 @@ def save_position(position: dict):
                     status          = EXCLUDED.status
             """, (
                 position["trade_id"], position["symbol"], position["side"],
-                position["entry_price"], position["size"], position["risk_amount"],
-                position["stop_loss"], position["take_profit"], position["rr"],
-                position.get("be_moved", False), position.get("trail_sl", False),
+                position["entry_price"], position["size"],
+                position.get("risk_amount", 0),
+                position["stop_loss"], position["take_profit"],
+                position.get("rr", 1.0),
+                position.get("be_moved", False),
+                position.get("trail_sl", False),
                 position.get("partial_closed", False),
                 position.get("mode", "SCALPER"),
                 position.get("atr_at_open", 0),
@@ -202,7 +231,7 @@ def get_open_positions() -> list:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 "SELECT * FROM positions WHERE status='OPEN' ORDER BY opened_at ASC")
-            return [_normalize_pos(dict(r)) for r in cur.fetchall()]
+            return [_normalize(dict(r)) for r in cur.fetchall()]
 
 def get_open_positions_count() -> int:
     with get_conn() as conn:
@@ -223,6 +252,7 @@ def clear_position():
         with conn.cursor() as cur:
             cur.execute("UPDATE positions SET status='CLOSED' WHERE status='OPEN'")
         conn.commit()
+
 
 # ── Trade History ─────────────────────────────────────────────────────────
 
@@ -251,24 +281,6 @@ def save_closed_trade(trade: dict):
             ))
         conn.commit()
 
-def load_trade_history(limit: int = 50) -> list:
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT * FROM trade_history ORDER BY closed_at DESC LIMIT %s",
-                (limit,))
-            rows = cur.fetchall()
-            result = []
-            for r in rows:
-                d = dict(r)
-                d["pl"]        = float(d.get("pl", 0))
-                d["entry"]     = float(d.get("entry", 0))
-                d["exit"]      = float(d.get("exit_price", 0))
-                d["closed_at"] = d["closed_at"].isoformat() if d.get("closed_at") else ""
-                d["opened_at"] = d["opened_at"].isoformat() if d.get("opened_at") else ""
-                result.append(d)
-            return result
-
 def load_closed_trades(days: int = 999) -> list:
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -276,7 +288,7 @@ def load_closed_trades(days: int = 999) -> list:
                 SELECT * FROM trade_history
                 WHERE closed_at >= NOW() - INTERVAL '%s days'
                 ORDER BY closed_at DESC
-            """, (days,))
+            """ % int(days))
             result = []
             for r in cur.fetchall():
                 d = dict(r)
@@ -287,6 +299,10 @@ def load_closed_trades(days: int = 999) -> list:
                 d["closed_at"] = d["closed_at"].isoformat() if d.get("closed_at") else ""
                 result.append(d)
             return result
+
+def load_trade_history(limit: int = 50) -> list:
+    return load_closed_trades(999)[:limit]
+
 
 # ── Journal ───────────────────────────────────────────────────────────────
 
@@ -301,9 +317,9 @@ def append_trade(entry: dict):
                 entry.get("action",""),
                 entry.get("symbol",""),
                 entry.get("side", entry.get("side_considered","")),
-                entry.get("price", entry.get("entry", 0)),
-                entry.get("pl", 0),
-                entry.get("reason", entry.get("exit_reason","")),
+                entry.get("price", entry.get("entry",0)) or 0,
+                entry.get("pl",0) or 0,
+                entry.get("reason", entry.get("exit_reason","")) or "",
                 json.dumps(entry)
             ))
         conn.commit()
@@ -325,7 +341,7 @@ def load_recent(n: int = 50) -> list:
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT data, created_at FROM journal ORDER BY created_at DESC LIMIT %s",
+                "SELECT data FROM journal ORDER BY created_at DESC LIMIT %s",
                 (n,))
             result = []
             for r in cur.fetchall():
@@ -335,7 +351,8 @@ def load_recent(n: int = 50) -> list:
                 result.append(d)
             return result
 
-# ── Price cache ───────────────────────────────────────────────────────────
+
+# ── Price Cache ───────────────────────────────────────────────────────────
 
 def cache_price(symbol: str, price: float):
     with get_conn() as conn:
