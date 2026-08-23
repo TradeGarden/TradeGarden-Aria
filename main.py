@@ -690,7 +690,8 @@ updateEquity();
 
 @app.get("/weekly", response_class=HTMLResponse)
 async def reports_page():
-    d = daily_report(); w = weekly_report(); m = monthly_report()
+    from reports import full_stats
+    d = daily_report(); w = weekly_report(); m = monthly_report(); at = full_stats()
     html = (f"<!DOCTYPE html><html><head><meta charset='UTF-8'>"
             f"<title>Aria · Reports</title>{base_css()}</head><body>"
             f"{_topbar('', 'weekly')}"
@@ -698,6 +699,7 @@ async def reports_page():
             f"<div class='card'><div class='card-title'>Daily - Last 24 Hours</div>{_report_block(d)}</div>"
             f"<div class='card'><div class='card-title'>Weekly - Last 7 Days</div>{_report_block(w)}</div>"
             f"<div class='card'><div class='card-title'>Monthly - Last 30 Days</div>{_report_block(m)}</div>"
+            f"<div class='card'><div class='card-title'>All Time</div>{_report_block(at)}</div>"
             f"</div></body></html>")
     return HTMLResponse(html)
 
@@ -747,7 +749,10 @@ async def recommendations_page():
 
 @app.get("/journal", response_class=HTMLResponse)
 async def journal_page():
-    trades = load_recent(50)
+    # Load journal but only show real trades (OPEN, CLOSE, PARTIAL_TP, SL_MOVED_BE)
+    all_entries = load_recent(200)
+    trades = [t for t in all_entries
+              if t.get("action","") in ("OPEN","CLOSE","PARTIAL_TP","SL_MOVED_BE")][:50]
     rows   = ""
     for t in trades:
         action    = t.get("action", "")
