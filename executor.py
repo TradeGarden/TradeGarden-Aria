@@ -1,16 +1,25 @@
 """
-executor.py - Aria Trading Engine
-Professional rules. Quality over quantity.
-3-8 good trades per day. Not 100 random ones.
+executor.py — Aria Professional Trading Engine
+===============================================
+Structure-first. R-based profit protection.
 
-Entry requires ALL of:
-  1. Market structure aligned (Bullish for BUY, Bearish for SELL)
-  2. EMA20 above EMA50 (BUY) or below (SELL)
-  3. RSI not extreme
-  4. At least 2 timeframes agreeing
-  5. Confidence >= 70%
-  6. R:R >= 1.5
-  7. Under daily limits
+Entry hierarchy (in order of priority):
+  1. Market structure (HH/HL, BOS, CHoCH, S/R, FVG)
+  2. Multi-timeframe confirmation (2+ TFs agree)
+  3. Momentum and volume
+  4. Technical indicators (confirm only)
+
+R-Based Milestone System:
+  +1R   → Break-even (SL to entry) — NEVER lose again
+  +1.2R → Lock profit (SL above entry — guaranteed gain)
+  +2R   → Partial TP 50% + activate trail on remainder
+  +2.5R → Strong continuation
+  +3R+  → Let winner run if structure valid
+
+Timeout (structure invalidation overrides time):
+  15m/1H → 4h timeout
+  1H/4H  → 12h timeout
+  4H/1D  → 24h timeout
 """
 
 import threading, time, uuid
@@ -23,18 +32,19 @@ from database import (
     recalc_equity, cache_price,
 )
 from config import (
-    RISK_PER_TRADE_PCT, DAILY_LOSS_LIMIT_PCT,
-    MIN_RISK_REWARD, MIN_CONFIDENCE,
+    MAX_RISK_USD, RISK_PER_TRADE_PCT, DAILY_LOSS_LIMIT_PCT,
+    MIN_RISK_REWARD, MIN_CONFIDENCE, MIN_TREND_STRENGTH,
+    MIN_TIMEFRAMES_ALIGNED, RSI_OVERBOUGHT, RSI_OVERSOLD,
     MAX_TRADES_PER_DAY, MAX_OPEN_POSITIONS, VALID_SYMBOLS,
-    SL_ATR_MULTIPLIER, TP_ATR_MULTIPLIER,
-    BREAKEVEN_USD, PARTIAL_TP_USD, TRAIL_AFTER_USD,
-    TIMEOUT_MINUTES, MIN_PROFIT_USD, SCAN_INTERVAL_SECONDS,
-    MIN_TREND_STRENGTH, MIN_TIMEFRAMES_ALIGNED,
-    RSI_OVERBOUGHT, RSI_OVERSOLD,
+    SL_ATR_MULTIPLIER, TRAIL_ATR_MULT,
+    MILESTONE_BREAKEVEN, MILESTONE_LOCK, MILESTONE_LOCK_AMOUNT,
+    MILESTONE_PARTIAL_TP, MILESTONE_TRAIL,
+    TIMEOUT_SHORT_HOURS, TIMEOUT_MEDIUM_HOURS, TIMEOUT_LONG_HOURS,
+    MAX_HOLD_DAYS, MIN_PROFIT_TO_HOLD, SCAN_INTERVAL_SECONDS,
 )
 
 
-# ── Candle strength score (0-20) ──────────────────────────────────────────
+# ── Candle strength (structure-aware) ─────────────────────────────────────
 
 def candle_strength(candles: list, ema20: float, avg_vol: float) -> int:
     if len(candles) < 2:
@@ -73,35 +83,39 @@ def compute_confidence(analysis: dict, decision: str) -> dict:
           "BUY" if ms.get("trend") == "Bullish" else "SELL")
     buy = d == "BUY"
 
-    # Market Structure (25pts)
-    if (buy and ms.get("trend") == "Bullish") or \
-       (not buy and ms.get("trend") == "Bearish"):
-        scores["Market Structure"] = 25
-    elif ms.get("trend") in ("Bullish","Bearish"):
+    # Market Structure — priority 1
+    trend = ms.get("trend","")
+    bos   = ms.get("bos", False)
+    choch = ms.get("choch", False)
+    if (buy and trend=="Bullish") or (not buy and trend=="Bearish"):
+        scores["Market Structure"] = 20
+        if bos:   scores["Market Structure"] = min(25, scores["Market Structure"] + 3)
+        if choch: scores["Market Structure"] = min(25, scores["Market Structure"] + 2)
+    elif trend in ("Bullish","Bearish"):
         scores["Market Structure"] = 10
 
-    # EMA (25pts)
+    # EMA — confirms structure
     if (buy and e20 > e50) or (not buy and e20 < e50):
         scores["EMA Alignment"] = 25
 
-    # RSI (15pts)
+    # RSI — momentum
     if buy:
         if 40 < r < 70:  scores["RSI"] = 15
         elif r <= 40:     scores["RSI"] = 10
-        elif r < 78:      scores["RSI"] = 5
+        elif r < RSI_OVERBOUGHT: scores["RSI"] = 5
     else:
         if 30 < r < 60:  scores["RSI"] = 15
         elif r >= 60:     scores["RSI"] = 10
-        elif r > 22:      scores["RSI"] = 5
+        elif r > RSI_OVERSOLD: scores["RSI"] = 5
 
-    # Candle strength (20pts)
+    # Candle strength — volume + pattern
     scores["Candle Strength"] = candle_strength(
         analysis.get("candles", []),
         e20,
         vol.get("avg20", 0)
     )
 
-    # Volume (15pts)
+    # Volume
     bp = vol.get("buy_pressure", 50)
     sp = vol.get("sell_pressure", 50)
     if buy:
@@ -112,46 +126,96 @@ def compute_confidence(analysis: dict, decision: str) -> dict:
     return {"breakdown": scores, "total": sum(scores.values())}
 
 
-# ── Position sizing ───────────────────────────────────────────────────────
+# ── Structure invalidation check ──────────────────────────────────────────
+
+def structure_still_valid(position: dict, analysis: dict) -> bool:
+    """
+    Returns False if the original trade thesis is broken.
+    Structure invalidation → exit immediately, time is secondary.
+    """
+    side  = position["side"]
+    ms    = analysis.get("ms", {})
+    e20   = analysis.get("ema20", 0)
+    e50   = analysis.get("ema50", 0)
+    r     = analysis.get("rsi14", 50)
+    trend = ms.get("trend","")
+
+    if side == "BUY":
+        if trend == "Bearish": return False   # structure flipped
+        if e20 < e50:          return False   # EMA reversed
+        if r > 82:             return False   # extreme overbought
+    else:
+        if trend == "Bullish": return False
+        if e20 > e50:          return False
+        if r < 18:             return False
+
+    return True
+
+
+# ── Dynamic timeout by entry timeframe ───────────────────────────────────
+
+def get_timeout_hours(position: dict) -> float:
+    """Returns timeout hours based on which TF triggered the entry."""
+    # For now default to medium — future: store entry TF in position
+    return TIMEOUT_MEDIUM_HOURS
+
+
+# ── Position sizing ($5 max risk, R-based) ────────────────────────────────
 
 def calc_position(balance: float, price: float, atr: float,
                   side: str, confidence: int) -> dict:
-    # Scale by confidence - higher confidence = bigger position
+    """
+    Size is always derived from risk, never from desired profit.
+    1R = actual initial risk. Max $5.
+
+    Size = Risk / SL_distance
+    If ATR is large → smaller size (never more than $5 risk)
+    """
+    # Confidence-based scaling within the $5 cap
     if confidence >= 85:
-        mult, label = 1.0, f"Full position ({confidence}% conf)"
+        mult = 1.0
     elif confidence >= 75:
-        mult, label = 0.7, f"70% position ({confidence}% conf)"
+        mult = 0.8
     else:
-        mult, label = 0.5, f"Half position ({confidence}% conf)"
+        mult = 0.6
 
-    risk_usd = round(balance * RISK_PER_TRADE_PCT / 100 * mult, 2)
-    risk_usd = max(risk_usd, 0.50)
+    # Risk amount: $5 cap OR 1% of balance, whichever is smaller
+    pct_risk = round(balance * RISK_PER_TRADE_PCT / 100, 2)
+    risk_1r  = round(min(MAX_RISK_USD, pct_risk) * mult, 2)
+    risk_1r  = max(risk_1r, 0.50)  # minimum $0.50
 
-    if side == "BUY":
-        sl = round(price - atr * SL_ATR_MULTIPLIER, 2)
-        tp = round(price + atr * TP_ATR_MULTIPLIER, 2)
-    else:
-        sl = round(price + atr * SL_ATR_MULTIPLIER, 2)
-        tp = round(price - atr * TP_ATR_MULTIPLIER, 2)
-
-    sl_dist = abs(price - sl)
-    tp_dist = abs(tp - price)
-
-    # Minimum stop distance
+    # SL distance in price
+    sl_dist = atr * SL_ATR_MULTIPLIER
     if sl_dist < price * 0.001:
         sl_dist = price * 0.001
-        sl = round(price - sl_dist, 2) if side == "BUY" \
-             else round(price + sl_dist, 2)
 
-    rr   = round(tp_dist / sl_dist, 2) if sl_dist > 0 else 0.0
-    size = round(risk_usd / sl_dist, 6) if sl_dist > 0 else 0.0
+    if side == "BUY":
+        sl = round(price - sl_dist, 2)
+        tp = round(price + sl_dist * (MIN_RISK_REWARD / 1.0) * 1.2, 2)  # TP at 1.8R+
+    else:
+        sl = round(price + sl_dist, 2)
+        tp = round(price - sl_dist * (MIN_RISK_REWARD / 1.0) * 1.2, 2)
+
+    tp_dist = abs(tp - price)
+    rr      = round(tp_dist / sl_dist, 2)
+    size    = round(risk_1r / sl_dist, 6)
+
+    # Labels for clarity
+    if mult == 1.0:
+        label = f"Full 1R (${risk_1r:.2f} risk, conf {confidence}%)"
+    elif mult == 0.8:
+        label = f"0.8R (${risk_1r:.2f} risk, conf {confidence}%)"
+    else:
+        label = f"0.6R (${risk_1r:.2f} risk, conf {confidence}%)"
 
     return {
-        "risk_usd":   risk_usd,
+        "risk_1r":    risk_1r,
+        "risk_usd":   risk_1r,
         "size":       size,
         "stop_loss":  sl,
         "take_profit":tp,
         "rr":         rr,
+        "sl_dist":    sl_dist,
         "size_label": label,
     }
 
@@ -180,81 +244,90 @@ def todays_loss_pct(balance: float) -> float:
         return 0.0
 
 
-# ── Rule enforcement ──────────────────────────────────────────────────────
+# ── Rule enforcement (structure-first) ───────────────────────────────────
 
 def check_rules(symbol: str, side: str, analysis: dict,
                 confidence: int, rr: float, balance: float) -> dict:
     ms     = analysis.get("ms", {})
     frames = analysis.get("frames", [])
 
-    # 1. Daily limits
+    # Hard limits
     if get_open_positions_count() >= MAX_OPEN_POSITIONS:
         return {"approved": False,
                 "reason": f"Max {MAX_OPEN_POSITIONS} positions open. Waiting."}
 
     if todays_trade_count() >= MAX_TRADES_PER_DAY:
         return {"approved": False,
-                "reason": f"Daily limit {MAX_TRADES_PER_DAY} trades reached."}
+                "reason": f"Daily ceiling of {MAX_TRADES_PER_DAY} trades reached."}
 
     if todays_loss_pct(balance) >= DAILY_LOSS_LIMIT_PCT:
         return {"approved": False,
-                "reason": f"Daily loss limit {DAILY_LOSS_LIMIT_PCT}% reached. Stopped for today."}
+                "reason": f"Daily loss limit {DAILY_LOSS_LIMIT_PCT}% hit. Done for today."}
 
-    # 2. One position per symbol
     if any(p["symbol"] == symbol for p in get_open_positions()):
         return {"approved": False,
-                "reason": f"{symbol} already has open position."}
+                "reason": f"{symbol} already open. One per symbol."}
 
-    # 3. Market structure MUST align
-    trend = ms.get("trend","")
+    # ── Priority 1: Market Structure ──────────────────────────────────────
+    trend    = ms.get("trend","")
+    strength = ms.get("strength_pct", 0)
+    bos      = ms.get("bos", False)
+
     if side == "BUY" and trend != "Bullish":
         return {"approved": False,
-                "reason": f"Market structure is {trend}. Need Bullish to BUY."}
+                "reason": f"Structure is {trend} ({ms.get('sequence','')}). "
+                          f"Need Bullish HH/HL to BUY."}
     if side == "SELL" and trend != "Bearish":
         return {"approved": False,
-                "reason": f"Market structure is {trend}. Need Bearish to SELL."}
+                "reason": f"Structure is {trend} ({ms.get('sequence','')}). "
+                          f"Need Bearish LH/LL to SELL."}
 
-    # 4. Trend strength must be meaningful
-    strength = ms.get("strength_pct", 0)
     if strength < MIN_TREND_STRENGTH:
         return {"approved": False,
-                "reason": f"Trend too weak ({strength}%). Need {MIN_TREND_STRENGTH}%+."}
+                "reason": f"Trend strength only {strength}%. "
+                          f"Need {MIN_TREND_STRENGTH}%+ for a valid entry."}
 
-    # 5. EMA MUST align
-    e20 = analysis.get("ema20", 0)
-    e50 = analysis.get("ema50", 0)
-    if side == "BUY" and e20 <= e50:
-        return {"approved": False,
-                "reason": f"EMA20 (${e20:,.0f}) below EMA50 (${e50:,.0f}). No uptrend."}
-    if side == "SELL" and e20 >= e50:
-        return {"approved": False,
-                "reason": f"EMA20 (${e20:,.0f}) above EMA50 (${e50:,.0f}). No downtrend."}
-
-    # 6. RSI must not be extreme against trade
-    r = analysis.get("rsi14", 50)
-    if side == "BUY" and r > RSI_OVERBOUGHT:
-        return {"approved": False,
-                "reason": f"RSI overbought at {r:.1f}. Waiting for pullback."}
-    if side == "SELL" and r < RSI_OVERSOLD:
-        return {"approved": False,
-                "reason": f"RSI oversold at {r:.1f}. Waiting for bounce."}
-
-    # 7. Multi-timeframe: at least 2 must agree
+    # ── Priority 2: Multi-Timeframe Confirmation ──────────────────────────
     tf_agree = sum(1 for f in frames if f.get("decision") == side)
     if tf_agree < MIN_TIMEFRAMES_ALIGNED:
         return {"approved": False,
                 "reason": f"Only {tf_agree}/4 timeframes agree on {side}. "
-                          f"Need {MIN_TIMEFRAMES_ALIGNED}+."}
+                          f"Need {MIN_TIMEFRAMES_ALIGNED}+. Waiting for confluence."}
 
-    # 8. R:R minimum
+    # ── Priority 3: EMA ────────────────────────────────────────────────────
+    e20 = analysis.get("ema20", 0)
+    e50 = analysis.get("ema50", 0)
+    if side == "BUY" and e20 <= e50:
+        return {"approved": False,
+                "reason": f"EMA20 (${e20:,.0f}) below EMA50 (${e50:,.0f}). "
+                          f"No uptrend confirmation."}
+    if side == "SELL" and e20 >= e50:
+        return {"approved": False,
+                "reason": f"EMA20 (${e20:,.0f}) above EMA50 (${e50:,.0f}). "
+                          f"No downtrend confirmation."}
+
+    # ── Priority 4: RSI (indicator, not structure) ────────────────────────
+    r = analysis.get("rsi14", 50)
+    if side == "BUY" and r > RSI_OVERBOUGHT:
+        return {"approved": False,
+                "reason": f"RSI {r:.1f} above {RSI_OVERBOUGHT}. "
+                          f"Overbought — wait for pullback."}
+    if side == "SELL" and r < RSI_OVERSOLD:
+        return {"approved": False,
+                "reason": f"RSI {r:.1f} below {RSI_OVERSOLD}. "
+                          f"Oversold — wait for bounce."}
+
+    # R:R check
     if rr < MIN_RISK_REWARD:
         return {"approved": False,
-                "reason": f"R:R 1:{rr} below minimum 1:{MIN_RISK_REWARD}."}
+                "reason": f"R:R 1:{rr} below minimum 1:{MIN_RISK_REWARD}. "
+                          f"Not worth the risk."}
 
-    # 9. Confidence minimum
+    # Confidence check
     if confidence < MIN_CONFIDENCE:
         return {"approved": False,
-                "reason": f"Confidence {confidence}% below minimum {MIN_CONFIDENCE}%."}
+                "reason": f"Confidence {confidence}% below {MIN_CONFIDENCE}%. "
+                          f"Setup not strong enough."}
 
     return {"approved": True, "reason": "All conditions met."}
 
@@ -281,17 +354,20 @@ def open_trade(symbol: str, side: str, analysis: dict, decision: dict) -> dict:
             "side":           side,
             "entry_price":    price,
             "size":           calc["size"],
-            "risk_amount":    calc["risk_usd"],
+            "risk_amount":    calc["risk_1r"],
+            "risk_1r":        calc["risk_1r"],
             "stop_loss":      calc["stop_loss"],
             "take_profit":    calc["take_profit"],
             "rr":             rr,
-            "mode":           "SCALPER",
+            "mode":           "STRUCTURED",
             "opened_at":      datetime.utcnow().isoformat(),
             "status":         "OPEN",
             "be_moved":       False,
+            "profit_locked":  False,
             "partial_closed": False,
             "trail_sl":       False,
             "atr_at_open":    atr,
+            "sl_dist":        calc["sl_dist"],
         }
         save_position(position)
 
@@ -307,7 +383,7 @@ def open_trade(symbol: str, side: str, analysis: dict, decision: dict) -> dict:
             "stop_loss":   calc["stop_loss"],
             "take_profit": calc["take_profit"],
             "size":        calc["size"],
-            "risk":        calc["risk_usd"],
+            "risk_1r":     calc["risk_1r"],
             "size_label":  calc["size_label"],
             "rr":          rr,
             "confidence":  confidence,
@@ -315,6 +391,7 @@ def open_trade(symbol: str, side: str, analysis: dict, decision: dict) -> dict:
             "structure":   ms.get("structure",""),
             "sequence":    ms.get("sequence",""),
             "strength":    ms.get("strength_pct",0),
+            "bos":         ms.get("bos", False),
             "ema20":       analysis.get("ema20",0),
             "ema50":       analysis.get("ema50",0),
             "rsi":         analysis.get("rsi14",0),
@@ -326,8 +403,8 @@ def open_trade(symbol: str, side: str, analysis: dict, decision: dict) -> dict:
 
         _log(f"OPENED #{trade_id} {side} {calc['size']} {symbol} "
              f"@ ${price:,.2f} | SL ${calc['stop_loss']:,.2f} "
-             f"| TP ${calc['take_profit']:,.2f} | Conf {confidence}% "
-             f"| {calc['size_label']}")
+             f"| TP ${calc['take_profit']:,.2f} | R:R 1:{rr} "
+             f"| Risk ${calc['risk_1r']:.2f} | {calc['size_label']}")
         return {"success": True, "position": position}
 
     except Exception as e:
@@ -340,11 +417,13 @@ def open_trade(symbol: str, side: str, analysis: dict, decision: dict) -> dict:
 def close_trade(position: dict, price: float,
                 reason: str = "Manual", partial: float = 1.0) -> dict:
     try:
-        entry = position["entry_price"]
-        side  = position["side"]
-        size  = round(position["size"] * partial, 6)
-        pl    = round(((price - entry) * size if side == "BUY"
-                       else (entry - price) * size), 2)
+        entry    = position["entry_price"]
+        side     = position["side"]
+        size     = round(position["size"] * partial, 6)
+        pl       = round(((price - entry) * size if side == "BUY"
+                          else (entry - price) * size), 2)
+        risk_1r  = position.get("risk_1r", position.get("risk_amount", 5.0))
+        r_mult   = round(pl / risk_1r, 2) if risk_1r > 0 else 0
 
         balance     = load_balance()
         new_balance = round(balance + pl, 2)
@@ -359,12 +438,11 @@ def close_trade(position: dict, price: float,
 
         duration = ""
         try:
-            opened   = datetime.fromisoformat(
+            opened = datetime.fromisoformat(
                 str(position["opened_at"]).replace(" ","T")[:19])
-            secs     = int((datetime.utcnow() - opened).total_seconds())
-            h        = secs // 3600
-            m        = (secs % 3600) // 60
-            duration = f"{h}h {m}m" if h > 0 else f"{m}m {secs%60}s"
+            secs   = int((datetime.utcnow() - opened).total_seconds())
+            h, m   = secs // 3600, (secs % 3600) // 60
+            duration = f"{h}h {m}m" if h > 0 else f"{m}m"
         except Exception:
             pass
 
@@ -375,15 +453,15 @@ def close_trade(position: dict, price: float,
                 "side":        side,
                 "entry":       entry,
                 "exit":        price,
-                "stop_loss":   position.get("stop_loss", 0),
-                "take_profit": position.get("take_profit", 0),
+                "stop_loss":   position.get("stop_loss",0),
+                "take_profit": position.get("take_profit",0),
                 "size":        size,
-                "risk":        position.get("risk_amount", 0),
+                "risk":        risk_1r,
                 "pl":          pl,
                 "new_balance": new_balance,
                 "duration":    duration,
                 "exit_reason": reason,
-                "mode":        "SCALPER",
+                "mode":        "STRUCTURED",
                 "opened_at":   str(position.get("opened_at","")),
             })
 
@@ -396,6 +474,7 @@ def close_trade(position: dict, price: float,
             "exit":        price,
             "size":        size,
             "pl":          pl,
+            "r_multiple":  r_mult,
             "new_balance": new_balance,
             "duration":    duration,
             "exit_reason": reason,
@@ -404,60 +483,84 @@ def close_trade(position: dict, price: float,
 
         emoji = "WIN" if pl >= 0 else "LOSS"
         _log(f"{emoji} #{position.get('trade_id','')} {position['symbol']} "
-             f"P/L ${pl:+,.2f} | Balance ${new_balance:,.2f} "
-             f"| {reason} [{duration}]")
-        return {"pl": pl, "new_balance": new_balance, "duration": duration}
+             f"P/L ${pl:+,.2f} ({r_mult:+.1f}R) | "
+             f"Balance ${new_balance:,.2f} | {reason} [{duration}]")
+        return {"pl": pl, "new_balance": new_balance,
+                "duration": duration, "r_multiple": r_mult}
 
     except Exception as e:
         _log(f"close_trade error: {e}")
-        return {"pl": 0, "new_balance": load_balance(), "duration": ""}
+        return {"pl": 0, "new_balance": load_balance(),
+                "duration": "", "r_multiple": 0}
 
 
-# ── Manage open position ──────────────────────────────────────────────────
+# ── R-Based position management ───────────────────────────────────────────
 
-def manage_position(position: dict, price: float, atr: float) -> bool:
-    """Returns True if position was fully closed."""
+def manage_position(position: dict, price: float,
+                    atr: float, analysis: dict) -> bool:
+    """
+    Full R-based milestone management.
+    Structure invalidation overrides all time rules.
+    Returns True if position was fully closed.
+    """
     try:
-        entry = position["entry_price"]
-        side  = position["side"]
-        size  = position["size"]
-        sl    = position["stop_loss"]
-        tp    = position["take_profit"]
+        entry   = position["entry_price"]
+        side    = position["side"]
+        size    = position["size"]
+        sl      = position["stop_loss"]
+        tp      = position["take_profit"]
+        risk_1r = position.get("risk_1r", position.get("risk_amount", 5.0))
+        sl_dist = position.get("sl_dist", abs(entry - sl))
 
+        # Current floating P/L
         fl = round(((price - entry) * size if side == "BUY"
                     else (entry - price) * size), 2)
+        r_earned = fl / risk_1r if risk_1r > 0 else 0
 
-        # Hard SL/TP check
+        # ── Hard SL/TP ───────────────────────────────────────────────────
         if side == "BUY":
             if price <= sl:
-                close_trade(position, price, "Stop Loss hit")
-                return True
+                close_trade(position, price, "Stop Loss hit"); return True
             if price >= tp:
-                close_trade(position, price, "Take Profit reached")
-                return True
+                close_trade(position, price, "Take Profit hit"); return True
         else:
             if price >= sl:
-                close_trade(position, price, "Stop Loss hit")
-                return True
+                close_trade(position, price, "Stop Loss hit"); return True
             if price <= tp:
-                close_trade(position, price, "Take Profit reached")
+                close_trade(position, price, "Take Profit hit"); return True
+
+        # ── Structure Invalidation — exit immediately ─────────────────────
+        if not structure_still_valid(position, analysis):
+            reason = (f"Structure invalidated — {analysis.get('ms',{}).get('trend','')} "
+                      f"reversed. Exit immediately.")
+            close_trade(position, price, reason)
+            _log(f"STRUCTURE INVALID — closed #{position.get('trade_id','')} "
+                 f"@ ${price:,.2f} P/L ${fl:+.2f}")
+            return True
+
+        # ── Timeout check (structure still valid = hold longer) ───────────
+        try:
+            opened     = datetime.fromisoformat(
+                str(position["opened_at"]).replace(" ","T")[:19])
+            hours_open = (datetime.utcnow() - opened).total_seconds() / 3600
+            timeout_h  = get_timeout_hours(position)
+
+            if hours_open >= MAX_HOLD_DAYS * 24:
+                close_trade(position, price,
+                            f"Max hold {MAX_HOLD_DAYS} days reached")
                 return True
 
-        # Timeout check
-        try:
-            opened    = datetime.fromisoformat(
-                str(position["opened_at"]).replace(" ","T")[:19])
-            mins_open = (datetime.utcnow() - opened).total_seconds() / 60
-            if mins_open >= TIMEOUT_MINUTES and fl < MIN_PROFIT_USD:
+            if hours_open >= timeout_h and fl < MIN_PROFIT_TO_HOLD:
                 close_trade(position, price,
-                            f"Timeout {mins_open:.0f}min P/L ${fl:.2f}")
+                            f"Timeout {hours_open:.1f}h — no progress (${fl:.2f})")
                 return True
         except Exception:
             pass
 
-        # Break-even at +$3
-        if not position.get("be_moved") and fl >= BREAKEVEN_USD:
-            new_sl = entry + 0.01 if side == "BUY" else entry - 0.01
+        # ── Milestone 1: Break-even at +1R ───────────────────────────────
+        if not position.get("be_moved") and r_earned >= MILESTONE_BREAKEVEN:
+            new_sl = round(entry + 0.01, 2) if side == "BUY" \
+                     else round(entry - 0.01, 2)
             if (side == "BUY" and new_sl > sl) or \
                (side == "SELL" and new_sl < sl):
                 position["stop_loss"] = new_sl
@@ -468,34 +571,73 @@ def manage_position(position: dict, price: float, atr: float) -> bool:
                     "trade_id":  position.get("trade_id",""),
                     "symbol":    position["symbol"],
                     "new_sl":    new_sl,
-                    "profit_at": fl,
+                    "r_at_move": round(r_earned, 2),
+                    "profit":    fl,
                     "timestamp": datetime.utcnow().isoformat(),
                 })
-                _log(f"Break-even @ ${new_sl:,.2f} "
-                     f"(+${fl:.2f}) #{position.get('trade_id','')}")
+                _log(f"BREAK-EVEN @ ${new_sl:,.2f} "
+                     f"(+{r_earned:.2f}R = +${fl:.2f}) "
+                     f"#{position.get('trade_id','')}")
 
-        # Partial TP 50% at +$6
-        if not position.get("partial_closed") and fl >= PARTIAL_TP_USD:
+        # ── Milestone 2: Lock profit at +1.2R ────────────────────────────
+        if position.get("be_moved") and \
+           not position.get("profit_locked") and \
+           r_earned >= MILESTONE_LOCK:
+            lock_price = (round(entry + sl_dist * MILESTONE_LOCK_AMOUNT, 2)
+                          if side == "BUY"
+                          else round(entry - sl_dist * MILESTONE_LOCK_AMOUNT, 2))
+            current_sl = position["stop_loss"]
+            if (side == "BUY"  and lock_price > current_sl) or \
+               (side == "SELL" and lock_price < current_sl):
+                position["stop_loss"]    = lock_price
+                position["profit_locked"]= True
+                save_position(position)
+                locked_usd = round(abs(lock_price - entry) * size, 2)
+                append_trade({
+                    "action":     "PROFIT_LOCKED",
+                    "trade_id":   position.get("trade_id",""),
+                    "symbol":     position["symbol"],
+                    "new_sl":     lock_price,
+                    "locked_usd": locked_usd,
+                    "r_at_move":  round(r_earned, 2),
+                    "timestamp":  datetime.utcnow().isoformat(),
+                })
+                _log(f"PROFIT LOCKED ${locked_usd:.2f} guaranteed "
+                     f"SL -> ${lock_price:,.2f} "
+                     f"(+{r_earned:.2f}R) "
+                     f"#{position.get('trade_id','')}")
+
+        # ── Milestone 3 + 4: Partial TP + Trail at +2R ───────────────────
+        if not position.get("partial_closed") and \
+           r_earned >= MILESTONE_PARTIAL_TP:
             close_trade(position, price,
-                        f"Partial TP at +${fl:.2f}", partial=0.5)
+                        f"Partial TP at +{r_earned:.1f}R (+${fl:.2f})",
+                        partial=0.5)
+            _log(f"PARTIAL TP 50% @ ${price:,.2f} "
+                 f"(+{r_earned:.1f}R = +${fl:.2f})")
 
-        # Trail remainder after +$10
-        if position.get("partial_closed") and fl >= TRAIL_AFTER_USD and atr > 0:
-            trail = atr * 0.5
+        # Trail the remaining position after partial TP
+        if position.get("partial_closed") and \
+           r_earned >= MILESTONE_TRAIL and \
+           atr > 0:
+            trail_dist = atr * TRAIL_ATR_MULT
             if side == "BUY":
-                new_sl = round(price - trail, 2)
+                new_sl = round(price - trail_dist, 2)
                 if new_sl > position["stop_loss"]:
                     position["stop_loss"] = new_sl
                     position["trail_sl"]  = True
                     save_position(position)
-                    _log(f"Trail SL -> ${new_sl:,.2f}")
+                    _log(f"TRAIL SL up to ${new_sl:,.2f} "
+                         f"(ATR×{TRAIL_ATR_MULT}) "
+                         f"#{position.get('trade_id','')}")
             else:
-                new_sl = round(price + trail, 2)
+                new_sl = round(price + trail_dist, 2)
                 if new_sl < position["stop_loss"]:
                     position["stop_loss"] = new_sl
                     position["trail_sl"]  = True
                     save_position(position)
-                    _log(f"Trail SL -> ${new_sl:,.2f}")
+                    _log(f"TRAIL SL down to ${new_sl:,.2f} "
+                         f"#{position.get('trade_id','')}")
 
         return False
 
@@ -550,7 +692,7 @@ def _loop():
     from analyzer        import analyze
     from decision_engine import decide
 
-    _log("Aria started — quality entries only")
+    _log("Aria started — Structure first. Quality only.")
 
     while _status["running"]:
         try:
@@ -567,8 +709,9 @@ def _loop():
                     _log(f"{symbol} scan error: {e}")
                     continue
 
-                if not scan_data.get("candles") or len(scan_data["candles"]) < 20:
-                    _log(f"{symbol} insufficient candle data")
+                if not scan_data.get("candles") or \
+                   len(scan_data["candles"]) < 20:
+                    _log(f"{symbol} insufficient data")
                     continue
 
                 # Stage 2: Analyze
@@ -584,15 +727,16 @@ def _loop():
                 analysis["candles"] = scan_data["candles"]
                 price = analysis.get("price", 0)
 
-                # Manage existing positions
+                # Manage open positions (pass analysis for structure check)
                 for pos in [p for p in get_open_positions()
                             if p["symbol"] == symbol]:
                     try:
-                        manage_position(pos, price, analysis.get("atr14", 0))
+                        manage_position(
+                            pos, price, analysis.get("atr14", 0), analysis)
                     except Exception as e:
                         _log(f"manage error: {e}")
 
-                # Stage 3: Decide + score confidence
+                # Stage 3: Decide
                 try:
                     decision = decide(analysis)
                     new_conf = compute_confidence(
@@ -602,23 +746,23 @@ def _loop():
                     _log(f"{symbol} decide error: {e}")
                     continue
 
-                dec  = decision.get("decision","WAIT")
-                conf = decision["confidence"]["total"]
-                ms   = analysis.get("ms",{})
+                dec    = decision.get("decision","WAIT")
+                conf   = decision["confidence"]["total"]
+                ms     = analysis.get("ms", {})
+                frames = analysis.get("frames", [])
+                tf_ok  = sum(1 for f in frames if f.get("decision") == dec)
 
-                # Log every scan result clearly
-                frames     = analysis.get("frames",[])
-                tf_agree   = sum(1 for f in frames if f.get("decision")==dec)
                 _status["last_decision"] = (
                     f"{symbol} {dec} | Conf {conf}% | "
-                    f"{ms.get('trend','')} {ms.get('sequence','')} | "
-                    f"{tf_agree}/4 TF agree")
+                    f"{ms.get('trend','')} "
+                    f"Str {ms.get('strength_pct',0)}% | "
+                    f"{tf_ok}/4 TF | RSI {analysis.get('rsi14',0):.1f}")
 
                 _log(f"{symbol} → {dec} | Conf {conf}% | "
                      f"Trend {ms.get('trend','')} "
-                     f"Strength {ms.get('strength_pct',0)}% | "
-                     f"RSI {analysis.get('rsi14',0):.1f} | "
-                     f"{tf_agree}/4 TF")
+                     f"({ms.get('strength_pct',0)}%) | "
+                     f"{tf_ok}/4 TF agree | "
+                     f"RSI {analysis.get('rsi14',0):.1f}")
 
                 if dec == "WAIT":
                     continue
@@ -637,7 +781,6 @@ def _loop():
         except Exception as e:
             _log(f"Loop error: {e}")
 
-        # Wait before next scan
         for _ in range(SCAN_INTERVAL_SECONDS):
             if not _status["running"]:
                 break
@@ -646,8 +789,6 @@ def _loop():
     _log("Aria stopped.")
 
 
-# ── Start / Stop ──────────────────────────────────────────────────────────
-
 def start_auto_trading():
     if _status["running"]:
         return
@@ -655,7 +796,7 @@ def start_auto_trading():
     _status["scans_today"] = 0
     threading.Thread(target=_loop,        daemon=True).start()
     threading.Thread(target=_equity_loop, daemon=True).start()
-    _log("Aria started — scanning every 60s")
+    _log("Aria Professional Engine started.")
 
 
 def stop_auto_trading():
