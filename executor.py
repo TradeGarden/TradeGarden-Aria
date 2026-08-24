@@ -557,8 +557,9 @@ def manage_position(position: dict, price: float,
         except Exception:
             pass
 
-        # ── Milestone 1: Break-even at +1R ───────────────────────────────
-        if not position.get("be_moved") and r_earned >= MILESTONE_BREAKEVEN:
+        # ── Milestone 1: Break-even at +$2 profit ───────────────────────
+        # Using USD directly - more reliable than R calculation
+        if not position.get("be_moved") and fl >= 2.0:
             new_sl = round(entry + 0.01, 2) if side == "BUY" \
                      else round(entry - 0.01, 2)
             if (side == "BUY" and new_sl > sl) or \
@@ -571,55 +572,51 @@ def manage_position(position: dict, price: float,
                     "trade_id":  position.get("trade_id",""),
                     "symbol":    position["symbol"],
                     "new_sl":    new_sl,
+                    "old_sl":    sl,
+                    "profit_at": round(fl, 2),
                     "r_at_move": round(r_earned, 2),
-                    "profit":    fl,
                     "timestamp": datetime.utcnow().isoformat(),
                 })
                 _log(f"BREAK-EVEN @ ${new_sl:,.2f} "
-                     f"(+{r_earned:.2f}R = +${fl:.2f}) "
+                     f"profit ${fl:.2f} — trade now RISK FREE "
                      f"#{position.get('trade_id','')}")
 
-        # ── Milestone 2: Lock profit at +1.2R ────────────────────────────
+        # ── Milestone 2: Lock $2.50 profit at +$3 ────────────────────────
         if position.get("be_moved") and \
-           not position.get("profit_locked") and \
-           r_earned >= MILESTONE_LOCK:
-            lock_price = (round(entry + sl_dist * MILESTONE_LOCK_AMOUNT, 2)
-                          if side == "BUY"
-                          else round(entry - sl_dist * MILESTONE_LOCK_AMOUNT, 2))
+           not position.get("profit_locked") and fl >= 3.0:
+            # Move SL to lock in $2.50 minimum profit
+            lock_size  = size if size > 0 else 0.001
+            lock_move  = 2.50 / lock_size if lock_size > 0 else 0
+            lock_price = (round(entry + lock_move, 2) if side == "BUY"
+                         else round(entry - lock_move, 2))
             current_sl = position["stop_loss"]
             if (side == "BUY"  and lock_price > current_sl) or \
                (side == "SELL" and lock_price < current_sl):
                 position["stop_loss"]    = lock_price
                 position["profit_locked"]= True
                 save_position(position)
-                locked_usd = round(abs(lock_price - entry) * size, 2)
                 append_trade({
                     "action":     "PROFIT_LOCKED",
                     "trade_id":   position.get("trade_id",""),
                     "symbol":     position["symbol"],
                     "new_sl":     lock_price,
-                    "locked_usd": locked_usd,
-                    "r_at_move":  round(r_earned, 2),
+                    "old_sl":     current_sl,
+                    "locked_usd": 2.50,
+                    "profit_at":  round(fl, 2),
                     "timestamp":  datetime.utcnow().isoformat(),
                 })
-                _log(f"PROFIT LOCKED ${locked_usd:.2f} guaranteed "
-                     f"SL -> ${lock_price:,.2f} "
-                     f"(+{r_earned:.2f}R) "
+                _log(f"$2.50 LOCKED — SL -> ${lock_price:,.2f} "
+                     f"(profit ${fl:.2f}) "
                      f"#{position.get('trade_id','')}")
 
-        # ── Milestone 3 + 4: Partial TP + Trail at +2R ───────────────────
-        if not position.get("partial_closed") and \
-           r_earned >= MILESTONE_PARTIAL_TP:
+        # ── Milestone 3 + 4: Partial TP at +$6, Trail after ─────────────
+        if not position.get("partial_closed") and fl >= 6.0:
             close_trade(position, price,
-                        f"Partial TP at +{r_earned:.1f}R (+${fl:.2f})",
-                        partial=0.5)
-            _log(f"PARTIAL TP 50% @ ${price:,.2f} "
-                 f"(+{r_earned:.1f}R = +${fl:.2f})")
+                        f"Partial TP at +${fl:.2f}", partial=0.5)
+            _log(f"PARTIAL TP 50% @ ${price:,.2f} (+${fl:.2f})")
 
         # Trail the remaining position after partial TP
-        if position.get("partial_closed") and \
-           r_earned >= MILESTONE_TRAIL and \
-           atr > 0:
+        if position.get("partial_closed") and fl >= 8.0 and atr > 0:
             trail_dist = atr * TRAIL_ATR_MULT
             if side == "BUY":
                 new_sl = round(price - trail_dist, 2)
