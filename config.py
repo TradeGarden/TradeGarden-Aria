@@ -34,8 +34,8 @@ SL_ATR_MULTIPLIER      = 1.5   # SL = 1.5× ATR (adapts to volatility)
 MIN_CONFIDENCE         = 70    # 70%+ confidence required
 MIN_TREND_STRENGTH     = 30    # 30%+ directional strength
 MIN_TIMEFRAMES_ALIGNED = 2     # At least 2 of 4 TFs must agree
-RSI_OVERBOUGHT         = 75    # No BUY entries above this
-RSI_OVERSOLD           = 25    # No SELL entries below this
+RSI_OVERBOUGHT         = 80    # No BUY entries above this (80+ is true overbought)
+RSI_OVERSOLD           = 20    # No SELL entries below this (20- is true oversold)
 
 # ── Working Timeframes ─────────────────────────────────────────────────────
 # 15m → entry confirmation
