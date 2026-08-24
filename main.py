@@ -316,22 +316,52 @@ def _conf_breakdown(conf):
 
 def _report_block(r):
     if r.get("trades", 0) == 0:
-        return (f"<div style='color:#333;padding:20px;text-align:center'>"
-                f"{r.get('message','No data')}</div>")
-    wr_c = "#2ecc71" if r["win_rate"]>=55 else ("#f39c12" if r["win_rate"]>=40 else "#e74c3c")
-    pl_c = "#2ecc71" if r["total_pl"]>=0 else "#e74c3c"
-    return f"""
-<div class="wk-grid">
-  <div class="wk-stat"><div class="v">{r['trades']}</div><div class="l">Trades</div></div>
-  <div class="wk-stat"><div class="v" style="color:#2ecc71">{r['wins']}</div><div class="l">Wins</div></div>
-  <div class="wk-stat"><div class="v" style="color:#e74c3c">{r['losses']}</div><div class="l">Losses</div></div>
-  <div class="wk-stat"><div class="v" style="color:{wr_c}">{r['win_rate']}%</div><div class="l">Win Rate</div></div>
-  <div class="wk-stat"><div class="v" style="color:#2ecc71">${r['avg_win']}</div><div class="l">Avg Win</div></div>
-  <div class="wk-stat"><div class="v" style="color:#e74c3c">${r['avg_loss']}</div><div class="l">Avg Loss</div></div>
-  <div class="wk-stat"><div class="v" style="color:{pl_c}">${r['total_pl']}</div><div class="l">Total P/L</div></div>
-  <div class="wk-stat"><div class="v" style="color:#2ecc71">${r['best_trade']['pl']}</div><div class="l">Best</div></div>
-  <div class="wk-stat"><div class="v" style="color:#e74c3c">${r['worst_trade']['pl']}</div><div class="l">Worst</div></div>
-</div>"""
+        return (f"<div style='color:#444;padding:20px;text-align:center'>"
+                f"{r.get('message','No completed trades yet.')}</div>")
+    wr_c  = "#2ecc71" if r["win_rate"]>=55 else ("#f39c12" if r["win_rate"]>=40 else "#e74c3c")
+    pl_c  = "#2ecc71" if r["total_pl"]>=0 else "#e74c3c"
+    best  = r.get("best_trade",{})
+    worst = r.get("worst_trade",{})
+
+    # Exit reasons breakdown
+    reasons_html = ""
+    for reason, count in sorted(
+            r.get("exit_reasons",{}).items(),
+            key=lambda x: x[1], reverse=True):
+        rc = ("#2ecc71" if "Profit" in reason or "Partial" in reason
+              else "#e74c3c" if "Stop Loss" in reason or "Structure" in reason
+              else "#888")
+        pct = round(count / r["trades"] * 100)
+        reasons_html += (
+            f"<div style='display:flex;justify-content:space-between;"
+            f"padding:4px 0;border-bottom:1px solid #141414;font-size:12px'>"
+            f"<span style='color:{rc}'>{reason}</span>"
+            f"<span style='color:#555'>{count}x ({pct}%)</span></div>"
+        )
+
+    out = (
+        f"<div class='wk-grid'>"
+        f"<div class='wk-stat'><div class='v'>{r['trades']}</div><div class='l'>Trades</div></div>"
+        f"<div class='wk-stat'><div class='v' style='color:#2ecc71'>{r['wins']}</div><div class='l'>Wins</div></div>"
+        f"<div class='wk-stat'><div class='v' style='color:#e74c3c'>{r['losses']}</div><div class='l'>Losses</div></div>"
+        f"<div class='wk-stat'><div class='v' style='color:{wr_c}'>{r['win_rate']}%</div><div class='l'>Win Rate</div></div>"
+        f"<div class='wk-stat'><div class='v' style='color:#2ecc71'>${r['avg_win']}</div><div class='l'>Avg Win</div></div>"
+        f"<div class='wk-stat'><div class='v' style='color:#e74c3c'>${r['avg_loss']}</div><div class='l'>Avg Loss</div></div>"
+        f"<div class='wk-stat'><div class='v' style='color:{pl_c}'>${r['total_pl']}</div><div class='l'>Total P/L</div></div>"
+        f"<div class='wk-stat'><div class='v' style='color:#2ecc71'>${best.get('pl',0)}</div>"
+        f"<div class='l'>Best ({best.get('symbol','')} {best.get('side','')})</div></div>"
+        f"<div class='wk-stat'><div class='v' style='color:#e74c3c'>${worst.get('pl',0)}</div>"
+        f"<div class='l'>Worst ({worst.get('symbol','')} {worst.get('side','')})</div></div>"
+        f"</div>"
+    )
+    if reasons_html:
+        out += (
+            f"<div style='margin-top:12px'>"
+            f"<div style='font-size:10px;color:#444;text-transform:uppercase;"
+            f"letter-spacing:1px;margin-bottom:8px'>Exit Reasons</div>"
+            f"{reasons_html}</div>"
+        )
+    return out
 
 def _aria_status_card() -> str:
     s = get_auto_status()
@@ -749,40 +779,131 @@ async def recommendations_page():
 
 @app.get("/journal", response_class=HTMLResponse)
 async def journal_page():
-    # Load journal but only show real trades (OPEN, CLOSE, PARTIAL_TP, SL_MOVED_BE)
-    all_entries = load_recent(200)
+    all_entries = load_recent(300)
     trades = [t for t in all_entries
-              if t.get("action","") in ("OPEN","CLOSE","PARTIAL_TP","SL_MOVED_BE")][:50]
-    rows   = ""
+              if t.get("action","") in
+              ("OPEN","CLOSE","PARTIAL_TP","SL_MOVED_BE","PROFIT_LOCKED")][:100]
+    rows = ""
     for t in trades:
-        action    = t.get("action", "")
-        pl        = t.get("pl", 0)
-        pl_c      = "#2ecc71" if pl > 0 else ("#e74c3c" if pl < 0 else "#888")
-        date      = t.get("closed_at", t.get("opened_at", t.get("timestamp","")))[:16].replace("T", " ")
-        entry_str = f" · Entry ${t['entry']:,.2f}"  if "entry" in t else ""
-        exit_str  = f" → Exit ${t['exit']:,.2f}"   if "exit"  in t else ""
-        pl_div    = f"<div style='color:{pl_c};font-weight:bold'>P/L: ${pl}</div>" if action=="CLOSE" else ""
-        reason    = t.get("exit_reason", t.get("reason", ""))
-        rsn_div   = f"<div style='color:#333;font-size:11px'>{reason}</div>" if reason else ""
-        sym       = t.get("symbol",""); side2 = t.get("side",""); tid = t.get("trade_id","")[:6]
-        action_color = ("#2ecc71" if action=="OPEN" else
-                        "#e74c3c" if action=="CLOSE" else
-                        "#f39c12" if action=="WAIT" else "#555")
-        rows += (f"<div class='trade-row'>"
-                 f"<div style='display:flex;justify-content:space-between;margin-bottom:4px'>"
-                 f"<span style='font-weight:bold;color:#fff'>{sym} {side2} "
-                 f"<span style='color:{action_color};font-size:11px'>[{action}]</span> "
-                 f"<span style='color:#333;font-size:11px'>#{tid}</span></span>"
-                 f"<span style='color:#333'>{date}</span></div>"
-                 f"<div style='color:#555;margin-bottom:3px'>{entry_str}{exit_str}</div>"
-                 f"{pl_div}{rsn_div}</div>")
+        action = t.get("action","")
+        sym    = t.get("symbol","")
+        side2  = t.get("side","")
+        tid    = t.get("trade_id","")
+
+        # Clean timestamp
+        raw_ts = t.get("closed_at", t.get("opened_at", t.get("timestamp","")))
+        try:
+            from datetime import datetime as _dt
+            ts_clean = _dt.fromisoformat(str(raw_ts).replace("T"," ")[:19])
+            date = ts_clean.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            date = str(raw_ts)[:16].replace("T"," ")
+
+        # Action color and label
+        ac = {"OPEN":"#2ecc71","CLOSE":"#e74c3c",
+              "PARTIAL_TP":"#f39c12","SL_MOVED_BE":"#3498db",
+              "PROFIT_LOCKED":"#9b59b6"}.get(action,"#555")
+
+        # Build detail lines
+        details = ""
+
+        if action == "OPEN":
+            entry = t.get("entry",0)
+            sl    = t.get("stop_loss",0)
+            tp    = t.get("take_profit",0)
+            rr    = t.get("rr",0)
+            risk  = t.get("risk_1r", t.get("risk",0))
+            conf  = t.get("confidence",0)
+            trend = t.get("trend","")
+            seq   = t.get("sequence","")
+            size_lbl = t.get("size_label","")
+            details = (
+                f"<div style='color:#888;font-size:12px;line-height:1.9'>"
+                f"Entry: <b style='color:#fff'>${entry:,.2f}</b> &nbsp;|&nbsp; "
+                f"Stop Loss: <b style='color:#e74c3c'>${sl:,.2f}</b> &nbsp;|&nbsp; "
+                f"Take Profit: <b style='color:#2ecc71'>${tp:,.2f}</b><br>"
+                f"R:R: <b style='color:#fff'>1:{rr}</b> &nbsp;|&nbsp; "
+                f"Risk: <b style='color:#fff'>${risk:.2f}</b> &nbsp;|&nbsp; "
+                f"Confidence: <b style='color:#fff'>{conf}%</b><br>"
+                f"Structure: <b style='color:#2ecc71'>{trend} {seq}</b> &nbsp;|&nbsp; "
+                f"{size_lbl}"
+                f"</div>"
+            )
+
+        elif action in ("CLOSE","PARTIAL_TP"):
+            entry  = t.get("entry",0)
+            exit_p = t.get("exit",0)
+            pl     = float(t.get("pl",0))
+            rmult  = t.get("r_multiple",0)
+            dur    = t.get("duration","")
+            reason = t.get("exit_reason","")
+            pl_c   = "#2ecc71" if pl >= 0 else "#e74c3c"
+            label  = "50% closed" if action=="PARTIAL_TP" else "Full close"
+            details = (
+                f"<div style='color:#888;font-size:12px;line-height:1.9'>"
+                f"Entry: <b style='color:#fff'>${entry:,.2f}</b> &nbsp;→&nbsp; "
+                f"Exit: <b style='color:#fff'>${exit_p:,.2f}</b><br>"
+                f"P/L: <b style='color:{pl_c};font-size:14px'>${pl:+,.2f}</b>"
+                f"{'&nbsp;|&nbsp;<b style="color:'+pl_c+'">'+str(rmult)+'R</b>' if rmult else ''}"
+                f" &nbsp;|&nbsp; {label} &nbsp;|&nbsp; Duration: {dur}<br>"
+                f"<span style='color:#444'>{reason}</span>"
+                f"</div>"
+            )
+
+        elif action == "SL_MOVED_BE":
+            new_sl   = t.get("new_sl",0)
+            profit_at= t.get("profit_at",0) or t.get("r_at_move",0)
+            details = (
+                f"<div style='color:#888;font-size:12px;line-height:1.9'>"
+                f"Stop Loss moved to Break-Even: "
+                f"<b style='color:#3498db'>${new_sl:,.2f}</b><br>"
+                f"Profit when triggered: "
+                f"<b style='color:#2ecc71'>${float(profit_at):.2f}</b> — "
+                f"Trade is now <b style='color:#2ecc71'>RISK FREE</b>"
+                f"</div>"
+            )
+
+        elif action == "PROFIT_LOCKED":
+            new_sl    = t.get("new_sl",0)
+            locked    = t.get("locked_usd",0)
+            details = (
+                f"<div style='color:#888;font-size:12px;line-height:1.9'>"
+                f"Profit locked — SL moved to "
+                f"<b style='color:#9b59b6'>${new_sl:,.2f}</b><br>"
+                f"Minimum guaranteed profit: "
+                f"<b style='color:#2ecc71'>${float(locked):.2f}</b>"
+                f"</div>"
+            )
+
+        rows += (
+            f"<div style='background:#111;border:1px solid #1a1a1a;border-radius:8px;"
+            f"padding:14px;margin-bottom:10px'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;"
+            f"margin-bottom:8px'>"
+            f"<div>"
+            f"<span style='font-weight:bold;color:#fff;font-size:14px'>{sym} {side2}</span>"
+            f"&nbsp;<span style='color:{ac};font-size:11px;font-weight:bold'>"
+            f"[{action}]</span>"
+            f"&nbsp;<span style='color:#333;font-size:11px'>#{tid[:8]}</span>"
+            f"</div>"
+            f"<span style='color:#444;font-size:11px'>{date}</span>"
+            f"</div>"
+            f"{details}"
+            f"</div>"
+        )
+
     if not rows:
-        rows = "<div style='color:#333;padding:30px;text-align:center'>No trades recorded yet. Aria is scanning...</div>"
+        rows = ("<div style='color:#444;padding:40px;text-align:center'>"
+                "No trades yet. Aria is scanning every 60 seconds.</div>")
+
     html = (f"<!DOCTYPE html><html><head><meta charset='UTF-8'>"
-            f"<title>Aria · Journal</title>{base_css()}</head><body>"
-            f"{_topbar('', 'journal')}"
-            f"<div style='max-width:900px;margin:24px auto;padding:0 20px'>{rows}</div>"
-            f"</body></html>")
+            f"<title>Aria Journal</title>{base_css()}</head><body>"
+            f"{_topbar('','journal')}"
+            f"<div style='max-width:960px;margin:20px auto;padding:0 16px'>"
+            f"<div style='font-size:11px;color:#333;margin-bottom:12px'>"
+            f"Showing OPEN · CLOSE · PARTIAL_TP · SL_MOVED_BE · PROFIT_LOCKED"
+            f"</div>"
+            f"{rows}</div></body></html>")
     return HTMLResponse(html)
 
 
