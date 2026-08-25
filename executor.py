@@ -529,14 +529,23 @@ def manage_position(position: dict, price: float,
             if price <= tp:
                 close_trade(position, price, "Take Profit hit"); return True
 
-        # ── Structure Invalidation — exit immediately ─────────────────────
+        # ── Structure Invalidation ────────────────────────────────────────
+        # Only exit immediately if at a loss or tiny profit
+        # If trade is profitable, let milestones protect it
         if not structure_still_valid(position, analysis):
-            reason = (f"Structure invalidated — {analysis.get('ms',{}).get('trend','')} "
-                      f"reversed. Exit immediately.")
-            close_trade(position, price, reason)
-            _log(f"STRUCTURE INVALID — closed #{position.get('trade_id','')} "
-                 f"@ ${price:,.2f} P/L ${fl:+.2f}")
-            return True
+            if fl >= 2.0:
+                # Good profit - hold, milestones are protecting
+                _log(f"Structure shifted but +${fl:.2f} profit — "
+                     f"milestones protecting #{position.get('trade_id','')}")
+            else:
+                # Loss or tiny profit with broken structure - exit
+                reason = (f"Structure invalidated — "
+                          f"{analysis.get('ms',{}).get('trend','')} reversed "
+                          f"(P/L ${fl:+.2f})")
+                close_trade(position, price, reason)
+                _log(f"STRUCTURE INVALID P/L ${fl:.2f} — "
+                     f"closed #{position.get('trade_id','')}")
+                return True
 
         # ── Timeout check (structure still valid = hold longer) ───────────
         try:
