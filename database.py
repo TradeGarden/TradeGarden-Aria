@@ -284,11 +284,12 @@ def save_closed_trade(trade: dict):
 def load_closed_trades(days: int = 999) -> list:
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT * FROM trade_history
-                WHERE closed_at >= NOW() - INTERVAL '%s days'
-                ORDER BY closed_at DESC
-            """ % int(days))
+            cur.execute(
+                "SELECT * FROM trade_history "
+                "WHERE closed_at >= NOW() - INTERVAL %s "
+                "ORDER BY closed_at DESC",
+                (f"{int(days)} days",)
+            )
             result = []
             for r in cur.fetchall():
                 d = dict(r)
