@@ -32,8 +32,8 @@ TRAIL_ATR_MULT        = 0.6   # Trail distance = ATR × 0.6
 MIN_RISK_REWARD        = 1.8   # Minimum 1.8:1 R:R — never take worse
 SL_ATR_MULTIPLIER      = 1.5   # SL = 1.5× ATR (adapts to volatility)
 MIN_CONFIDENCE         = 70    # 70%+ confidence required
-MIN_TREND_STRENGTH     = 30    # 30%+ directional strength
-MIN_TIMEFRAMES_ALIGNED = 2     # At least 2 of 4 TFs must agree
+MIN_TREND_STRENGTH     = 15    # 15%+ directional strength
+MIN_TIMEFRAMES_ALIGNED = 2     # At least 2 TFs must agree
 RSI_OVERBOUGHT         = 80    # No BUY entries above this (80+ is true overbought)
 RSI_OVERSOLD           = 20    # No SELL entries below this (20- is true oversold)
 
