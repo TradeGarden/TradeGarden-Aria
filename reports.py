@@ -55,7 +55,7 @@ def _build(trades, label):
         "generated_at":datetime.utcnow().isoformat(),
     }
 
-def daily_report():   return _build(load_closed_trades(1),   "Daily")
+def daily_report():   return _build(load_closed_trades(2),   "Daily")
 def weekly_report():  return _build(load_closed_trades(7),   "Weekly")
 def monthly_report(): return _build(load_closed_trades(30),  "Monthly")
 def full_stats():     return _build(load_closed_trades(999), "All Time")
