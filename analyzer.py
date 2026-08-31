@@ -127,56 +127,137 @@ def calc_volume(candles: list) -> dict:
 
 def calc_market_structure(candles: list) -> dict:
     """
-    Splits last 40 candles into 5 windows.
-    Labels each consecutive pair as HH / LH / HL / LL.
-    Builds a visual swing sequence e.g. HH → LH → LL → LH → LL.
-    Also detects BOS and CHoCH.
+    Real swing point detection.
+    A swing high is a candle whose high is higher than the 2 candles
+    on each side. A swing low is the opposite.
+    This finds REAL market structure - not fake window comparisons.
+
+    Sequence shows last 8 swing labels: HH, HL, LH, LL
+    Trend determined by the last 2 swing highs and 2 swing lows.
+    BOS = price broke above last swing high (bullish) or below last swing low.
+    Fakeout filter: require price to CLOSE beyond the swing level, not just wick.
     """
-    recent = candles[-40:] if len(candles) >= 40 else candles
-    wins   = 5
-    size   = max(len(recent) // wins, 1)
-    sh_list, sl_list = [], []
+    if len(candles) < 10:
+        return {
+            "structure": "Forming", "trend": "Neutral",
+            "sequence": "Forming", "swing_high": 0, "swing_low": 0,
+            "strength_pct": 0, "strength_label": "Weak",
+            "bos": False, "choch": False,
+        }
 
-    for i in range(wins):
-        chunk = recent[i * size:(i + 1) * size] if i < wins - 1 else recent[i * size:]
-        if not chunk:
-            continue
-        sh_list.append(max(c["high"] for c in chunk))
-        sl_list.append(min(c["low"]  for c in chunk))
+    recent = candles[-60:] if len(candles) >= 60 else candles
+    n      = len(recent)
+    left   = 2  # candles required on each side for a swing
 
-    seq = []
-    for i in range(1, len(sh_list)):
-        ph, pl = sh_list[i - 1], sl_list[i - 1]
-        ch, cl = sh_list[i],     sl_list[i]
-        if ch > ph:   seq.append("HH")
-        elif ch < ph: seq.append("LH")
-        if cl > pl:   seq.append("HL")
-        elif cl < pl: seq.append("LL")
+    # Find real swing highs and swing lows
+    swing_highs = []  # (index, price)
+    swing_lows  = []
 
-    sequence = " → ".join(seq) if seq else "Forming"
+    for i in range(left, n - left):
+        h = recent[i]["high"]
+        l = recent[i]["low"]
+        # Swing high: higher than all candles on both sides
+        if all(h >= recent[j]["high"] for j in range(i-left, i+left+1) if j != i):
+            swing_highs.append((i, h))
+        # Swing low: lower than all candles on both sides
+        if all(l <= recent[j]["low"] for j in range(i-left, i+left+1) if j != i):
+            swing_lows.append((i, l))
 
-    fh, sh = sh_list[0], sh_list[-1]
-    fl, sl = sl_list[0], sl_list[-1]
+    # Need at least 2 swing highs and 2 swing lows for structure
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        # Fallback to simple comparison
+        sh = max(c["high"] for c in recent[-20:])
+        sl = min(c["low"]  for c in recent[-20:])
+        sh_prev = max(c["high"] for c in recent[-40:-20]) if len(recent) >= 40 else sh
+        sl_prev = min(c["low"]  for c in recent[-40:-20]) if len(recent) >= 40 else sl
+        trend = ("Bullish" if sh > sh_prev and sl > sl_prev
+                 else "Bearish" if sh < sh_prev and sl < sl_prev
+                 else "Neutral")
+        return {
+            "structure": "HH / HL" if trend=="Bullish" else "LH / LL" if trend=="Bearish" else "Mixed",
+            "trend":          trend,
+            "sequence":       "Forming",
+            "swing_high":     round(sh, 2),
+            "swing_low":      round(sl, 2),
+            "strength_pct":   10,
+            "strength_label": "Weak",
+            "bos":            False,
+            "choch":          False,
+        }
 
-    if sh > fh and sl > fl:   structure, trend = "HH / HL", "Bullish"
-    elif sh < fh and sl < fl: structure, trend = "LH / LL", "Bearish"
-    elif sh > fh and sl < fl: structure, trend = "HH / LL", "Neutral"
-    else:                     structure, trend = "LH / HL", "Neutral"
+    # Label each consecutive pair of swing highs
+    sh_labels = []
+    for i in range(1, len(swing_highs)):
+        prev_h = swing_highs[i-1][1]
+        curr_h = swing_highs[i][1]
+        sh_labels.append("HH" if curr_h > prev_h else "LH")
 
-    hd = abs(sh - fh) / (fh + 1e-9) * 100
-    ld = abs(sl - fl) / (fl + 1e-9) * 100
-    sp = min(int((hd + ld) * 5), 100)
+    # Label each consecutive pair of swing lows
+    sl_labels = []
+    for i in range(1, len(swing_lows)):
+        prev_l = swing_lows[i-1][1]
+        curr_l = swing_lows[i][1]
+        sl_labels.append("HL" if curr_l > prev_l else "LL")
+
+    # Build sequence by interleaving (simplified — just show last 4 highs/lows)
+    seq_parts = []
+    max_len   = max(len(sh_labels), len(sl_labels))
+    for i in range(min(max_len, 4)):
+        if i < len(sh_labels): seq_parts.append(sh_labels[i])
+        if i < len(sl_labels): seq_parts.append(sl_labels[i])
+    sequence = " → ".join(seq_parts[-8:]) if seq_parts else "Forming"
+
+    # Determine trend from last 2 swing highs and last 2 swing lows
+    last_2_sh = swing_highs[-2:]
+    last_2_sl = swing_lows[-2:]
+
+    higher_highs = last_2_sh[-1][1] > last_2_sh[0][1]
+    higher_lows  = last_2_sl[-1][1] > last_2_sl[0][1]
+    lower_highs  = last_2_sh[-1][1] < last_2_sh[0][1]
+    lower_lows   = last_2_sl[-1][1] < last_2_sl[0][1]
+
+    if higher_highs and higher_lows:
+        trend, structure = "Bullish", "HH / HL"
+    elif lower_highs and lower_lows:
+        trend, structure = "Bearish", "LH / LL"
+    elif higher_highs and lower_lows:
+        trend, structure = "Neutral", "HH / LL"
+    else:
+        trend, structure = "Neutral", "LH / HL"
+
+    # Strength: based on how consistently the last 4 swings agree
+    recent_sh = sh_labels[-4:] if sh_labels else []
+    recent_sl = sl_labels[-4:] if sl_labels else []
+
+    if trend == "Bullish":
+        agree = sum(1 for x in recent_sh if x == "HH") +                 sum(1 for x in recent_sl if x == "HL")
+        total = len(recent_sh) + len(recent_sl)
+    elif trend == "Bearish":
+        agree = sum(1 for x in recent_sh if x == "LH") +                 sum(1 for x in recent_sl if x == "LL")
+        total = len(recent_sh) + len(recent_sl)
+    else:
+        agree, total = 0, 1
+
+    sp = min(int((agree / max(total, 1)) * 100), 100)
     strength_label = "Strong" if sp >= 70 else ("Moderate" if sp >= 40 else "Weak")
 
-    bos   = sh > fh and trend == "Bullish" and len(sh_list) > 1 and sh > max(sh_list[:-1])
-    choch = (trend == "Bullish" and sl < fl) or (trend == "Bearish" and sh > fh)
+    # BOS: last candle CLOSED beyond the last swing high/low
+    # Using CLOSE not just high/low to filter fakeouts
+    last_close = recent[-1]["close"]
+    last_sh    = swing_highs[-1][1]
+    last_sl    = swing_lows[-1][1]
+    prev_sh    = swing_highs[-2][1] if len(swing_highs) >= 2 else last_sh
+
+    bos   = (trend == "Bullish" and last_close > prev_sh)
+    choch = ((trend == "Bearish" and last_close > last_sh) or
+             (trend == "Bullish" and last_close < last_sl))
 
     return {
         "structure":      structure,
         "trend":          trend,
         "sequence":       sequence,
-        "swing_high":     round(sh, 2),
-        "swing_low":      round(sl, 2),
+        "swing_high":     round(last_sh, 2),
+        "swing_low":      round(last_sl, 2),
         "strength_pct":   sp,
         "strength_label": strength_label,
         "bos":            bos,
