@@ -446,24 +446,27 @@ def close_trade(position: dict, price: float,
         except Exception:
             pass
 
+        # Save ALL closes to trade_history (full and partial)
+        save_closed_trade({
+            "trade_id":    position.get("trade_id","") +
+                           ("" if partial >= 1.0 else "_P"),
+            "symbol":      position["symbol"],
+            "side":        side,
+            "entry":       entry,
+            "exit":        price,
+            "stop_loss":   position.get("stop_loss",0),
+            "take_profit": position.get("take_profit",0),
+            "size":        size,
+            "risk":        risk_1r,
+            "pl":          pl,
+            "new_balance": new_balance,
+            "duration":    duration,
+            "exit_reason": reason + (" (partial 50%)" if partial < 1.0 else ""),
+            "mode":        "STRUCTURED",
+            "opened_at":   str(position.get("opened_at","")),
+        })
         if partial >= 1.0:
-            save_closed_trade({
-                "trade_id":    position.get("trade_id",""),
-                "symbol":      position["symbol"],
-                "side":        side,
-                "entry":       entry,
-                "exit":        price,
-                "stop_loss":   position.get("stop_loss",0),
-                "take_profit": position.get("take_profit",0),
-                "size":        size,
-                "risk":        risk_1r,
-                "pl":          pl,
-                "new_balance": new_balance,
-                "duration":    duration,
-                "exit_reason": reason,
-                "mode":        "STRUCTURED",
-                "opened_at":   str(position.get("opened_at","")),
-            })
+            pass  # already saved above
 
         append_trade({
             "action":      "CLOSE" if partial >= 1.0 else "PARTIAL_TP",
@@ -559,9 +562,15 @@ def manage_position(position: dict, price: float,
                             f"Max hold {MAX_HOLD_DAYS} days reached")
                 return True
 
+            # Close if no meaningful progress after timeout
             if hours_open >= timeout_h and fl < MIN_PROFIT_TO_HOLD:
                 close_trade(position, price,
-                            f"Timeout {hours_open:.1f}h — no progress (${fl:.2f})")
+                            f"Timeout {hours_open:.1f}h no progress (${fl:.2f})")
+                return True
+            # Also close if been open very long with only small locked profit
+            if hours_open >= 48 and not position.get("partial_closed"):
+                close_trade(position, price,
+                            f"48h timeout — closing to free capital (${fl:.2f})")
                 return True
         except Exception:
             pass
