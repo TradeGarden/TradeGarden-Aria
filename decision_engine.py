@@ -16,7 +16,10 @@ Aria never forces a trade.
 """
 
 import os
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 AI_API_KEY = os.getenv("AI_API_KEY")
 client     = OpenAI(api_key=AI_API_KEY) if AI_API_KEY and AI_API_KEY.startswith("sk-") else None
