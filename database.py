@@ -12,7 +12,11 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 def get_conn():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL not set.")
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
+    # Works with both Supabase and Render PostgreSQL
+    try:
+        return psycopg2.connect(DATABASE_URL, sslmode="require")
+    except Exception:
+        return psycopg2.connect(DATABASE_URL)
 
 def setup_database():
     with get_conn() as conn:
