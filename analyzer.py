@@ -238,17 +238,38 @@ def calc_market_structure(candles: list) -> dict:
     else:
         agree, total = 0, 1
 
-    sp = min(int((agree / max(total, 1)) * 100), 100)
-    strength_label = "Strong" if sp >= 70 else ("Moderate" if sp >= 40 else "Weak")
+    raw_sp = int((agree / max(total, 1)) * 100)
 
-    # BOS: last candle CLOSED beyond the last swing high/low
-    # Using CLOSE not just high/low to filter fakeouts
+    # Get swing levels for BOS check and strength calculation
     last_close = recent[-1]["close"]
+    prev_close = recent[-2]["close"] if len(recent) >= 2 else last_close
     last_sh    = swing_highs[-1][1]
     last_sl    = swing_lows[-1][1]
     prev_sh    = swing_highs[-2][1] if len(swing_highs) >= 2 else last_sh
 
-    bos   = (trend == "Bullish" and last_close > prev_sh)
+    # Factor in price distance from swing levels - fixes 0% strength glitch
+    if trend == "Bullish" and last_sl > 0:
+        pct_above = (last_close - last_sl) / last_sl * 100
+        raw_sp = max(raw_sp, min(int(pct_above * 3), 60))
+    elif trend == "Bearish" and last_sh > 0:
+        pct_below = (last_sh - last_close) / last_sh * 100
+        raw_sp = max(raw_sp, min(int(pct_below * 3), 60))
+
+    # Minimum 15% if trend is clearly established
+    if trend in ("Bullish","Bearish") and total >= 2:
+        raw_sp = max(raw_sp, 15)
+
+    sp = min(raw_sp, 100)
+    strength_label = "Strong" if sp >= 70 else ("Moderate" if sp >= 40 else "Weak")
+
+    # BOS: requires BOTH last candle AND previous candle closed beyond level
+    # Single candle fakeout = not a real BOS
+    bos   = (trend == "Bullish" and
+             last_close > prev_sh and
+             prev_close > prev_sh * 0.997)
+    bos   = bos or (trend == "Bearish" and
+                    last_close < last_sl and
+                    prev_close < last_sl * 1.003)
     choch = ((trend == "Bearish" and last_close > last_sh) or
              (trend == "Bullish" and last_close < last_sl))
 
@@ -440,21 +461,34 @@ def detect_liquidity(candles: list, current_price: float) -> dict:
 # ──────────────────────────────────────────────
 
 def analyze_timeframe(candles: list, label: str) -> dict:
-    if len(candles) < 55:
-        return {"label": label, "decision": "N/A", "structure": "N/A", "trend": "N/A", "rsi": 0}
+    if len(candles) < 10:
+        return {"label": label, "decision": "N/A", "structure": "N/A",
+                "trend": "N/A", "rsi": 0, "strength": 0, "patterns": []}
     closes = [c["close"] for c in candles]
     e20    = calc_ema(closes, 20)
     e50    = calc_ema(closes, 50)
     r      = calc_rsi(closes, 14)
     ms     = calc_market_structure(candles)
-    bull   = e20 > e50 and r < 70 and ms["trend"] == "Bullish"
-    bear   = e20 < e50 and r > 30 and ms["trend"] == "Bearish"
+    # Detect patterns on this specific timeframe and tag them
+    raw_patterns = detect_patterns(candles) if len(candles) >= 5 else []
+    # Tag each pattern with which timeframe it was found on
+    tagged_patterns = [
+        {**p, "timeframe": label}
+        for p in raw_patterns
+    ]
+    bull = e20 > e50 and r < 75 and ms["trend"] == "Bullish"
+    bear = e20 < e50 and r > 25 and ms["trend"] == "Bearish"
     return {
         "label":     label,
         "decision":  "BUY" if bull else ("SELL" if bear else "HOLD"),
         "structure": ms["structure"],
         "trend":     ms["trend"],
-        "rsi":       r,
+        "strength":  ms["strength_pct"],
+        "bos":       ms["bos"],
+        "rsi":       round(r, 2),
+        "e20":       round(e20, 2),
+        "e50":       round(e50, 2),
+        "patterns":  tagged_patterns,
     }
 
 
