@@ -1,397 +1,307 @@
 """
-recommendations.py - Aria Engine Health & Improvement System
-=============================================================
-Not just stats. Actual analysis of what's working and what's failing.
-
-4 layers:
-  1. Statistical confidence (is there enough data?)
-  2. Pattern discovery (what conditions produce wins?)
-  3. Engine health checks (detect glitches, rule violations)
-  4. Risk/reward analysis (is the strategy actually good?)
-
-Activates at 3 trades. Gets smarter with more data.
+recommendations.py - Aria Engine Health & Intelligence Analysis
+==============================================================
+WIN != TARGET HIT — the most important distinction.
+Tracks exit quality, break-even efficiency, entry quality.
+Detects engine glitches automatically.
 """
 from database import load_closed_trades, load_journal
 from datetime import datetime
 
 
-# ── Helpers ───────────────────────────────────────────────────
-
-def _wr(trades):
-    if not trades: return 0.0
-    return round(len([t for t in trades if float(t.get("pl",0)) > 0])
-                 / len(trades) * 100, 1)
+def _wr(t):
+    if not t: return 0.0
+    return round(len([x for x in t if float(x.get("pl",0))>0])/len(t)*100,1)
 
 def _avg(vals):
-    return round(sum(vals)/len(vals), 2) if vals else 0.0
+    return round(sum(vals)/len(vals),2) if vals else 0.0
 
-def _profit_factor(trades):
-    wins  = sum(float(t.get("pl",0)) for t in trades if float(t.get("pl",0)) > 0)
-    loss  = abs(sum(float(t.get("pl",0)) for t in trades if float(t.get("pl",0)) < 0))
-    return round(wins / loss, 2) if loss > 0 else float("inf")
+def _pf(trades):
+    w = sum(float(t.get("pl",0)) for t in trades if float(t.get("pl",0))>0)
+    l = abs(sum(float(t.get("pl",0)) for t in trades if float(t.get("pl",0))<0))
+    return round(w/l,2) if l>0 else 999.0
 
+def _bar(n, total, width=20):
+    filled = int(n/max(total,1)*width)
+    return "█"*filled + "░"*(width-filled)
 
-# ── Engine Health Checks ──────────────────────────────────────
-
-def check_engine_health(trades, journal_entries) -> list:
-    """
-    Detect actual glitches and engine failures.
-    Returns list of issues found.
-    """
-    issues = []
-
-    # Check 1: Trades opened with 0% trend strength
-    zero_strength = [t for t in trades
-                     if t.get("exit_reason","").lower().find("strength") > -1]
-    # Check journal for suspicious opens
-    open_entries = [j for j in journal_entries if j.get("action") == "OPEN"]
-    low_conf_trades = [j for j in open_entries
-                       if int(j.get("confidence",100)) < 65]
-    if low_conf_trades:
-        issues.append({
-            "type":     "ENGINE_GLITCH",
-            "priority": "HIGH",
-            "title":    f"Low confidence entries detected ({len(low_conf_trades)} trades)",
-            "detail":   f"{len(low_conf_trades)} trades were opened below 65% confidence. "
-                        f"This may indicate the confidence scoring had a glitch or "
-                        f"rules were not properly enforced. Review those entries.",
-            "action":   "Check journal entries marked as low confidence",
-        })
-
-    # Check 2: Trades closed immediately at break-even
-    be_trades = [t for t in trades
-                 if t.get("exit_reason","").lower().find("break") > -1
-                 or abs(float(t.get("pl",0))) < 0.10]
-    if len(be_trades) > 0:
-        issues.append({
-            "type":     "PERFORMANCE",
-            "priority": "MEDIUM",
-            "title":    f"{len(be_trades)} trades closed at/near break-even ($0)",
-            "detail":   f"These trades hit break-even SL after profit protection triggered. "
-                        f"This is correct behavior — the trade was protected. "
-                        f"But if happening frequently, entry timing may need improvement.",
-            "action":   "Review if entries were at the right location or too late in the move",
-        })
-
-    # Check 3: Trades with very fast timeout (under 30 minutes)
-    fast_closes = []
-    for t in trades:
-        dur = t.get("duration","")
-        if "m" in dur and "h" not in dur:
-            try:
-                mins = int(dur.split("m")[0])
-                if mins < 30:
-                    fast_closes.append(t)
-            except Exception:
-                pass
-    if fast_closes:
-        issues.append({
-            "type":     "PERFORMANCE",
-            "priority": "MEDIUM",
-            "title":    f"{len(fast_closes)} trades closed in under 30 minutes",
-            "detail":   "These trades moved against you quickly or hit structure "
-                        "invalidation very fast. This can indicate entries at "
-                        "exhaustion points or during low-quality setups.",
-            "action":   "Review entry conditions on these fast-close trades",
-        })
-
-    # Check 4: Consecutive losses
-    pls = [float(t.get("pl",0)) for t in trades[-10:]]
-    streak = 0
-    max_streak = 0
-    for pl in pls:
-        if pl < 0:
-            streak += 1
-            max_streak = max(max_streak, streak)
-        else:
-            streak = 0
-    if max_streak >= 3:
-        issues.append({
-            "type":     "RISK",
-            "priority": "HIGH",
-            "title":    f"Losing streak of {max_streak} detected in last 10 trades",
-            "detail":   f"A streak of {max_streak} consecutive losses suggests "
-                        f"the market may be in a regime that doesn't suit the current strategy. "
-                        f"Consider pausing until market conditions improve.",
-            "action":   "Review market structure during the losing streak period",
-        })
-
-    return issues
-
-
-# ── Pattern Discovery ─────────────────────────────────────────
-
-def discover_patterns(trades) -> list:
-    """Find what conditions produce wins vs losses."""
-    insights = []
-    if len(trades) < 5:
-        return insights
-
-    # BTC vs ETH performance
-    btc = [t for t in trades if t.get("symbol","") == "BTCUSD"]
-    eth = [t for t in trades if t.get("symbol","") == "ETHUSD"]
-    if btc and eth:
-        btc_wr = _wr(btc)
-        eth_wr = _wr(eth)
-        btc_pl = round(sum(float(t.get("pl",0)) for t in btc), 2)
-        eth_pl = round(sum(float(t.get("pl",0)) for t in eth), 2)
-        diff = abs(btc_wr - eth_wr)
-        if diff >= 20:
-            better   = "BTC" if btc_wr > eth_wr else "ETH"
-            worse    = "ETH" if btc_wr > eth_wr else "BTC"
-            better_wr= btc_wr if btc_wr > eth_wr else eth_wr
-            worse_wr = eth_wr if btc_wr > eth_wr else btc_wr
-            insights.append({
-                "priority":   "MEDIUM",
-                "emoji":      "📊",
-                "title":      f"{better} outperforms {worse} significantly",
-                "detail":     f"{better}: {better_wr}% win rate | {worse}: {worse_wr}% win rate. "
-                              f"Difference of {diff:.0f}% is meaningful.",
-                "confidence": "Medium" if len(trades) < 20 else "High",
-                "action":     f"Consider focusing on {better} setups when conditions allow.",
-                "evidence":   f"BTC: {len(btc)} trades ${btc_pl:+.2f} | ETH: {len(eth)} trades ${eth_pl:+.2f}",
-            })
-
-    # BUY vs SELL
-    buys  = [t for t in trades if t.get("side","") == "BUY"]
-    sells = [t for t in trades if t.get("side","") == "SELL"]
-    if buys and sells:
-        b_wr = _wr(buys)
-        s_wr = _wr(sells)
-        if abs(b_wr - s_wr) >= 25:
-            better = "BUY" if b_wr > s_wr else "SELL"
-            insights.append({
-                "priority":   "MEDIUM",
-                "emoji":      "🎯",
-                "title":      f"{better} trades are significantly stronger",
-                "detail":     f"BUY: {b_wr}% win rate ({len(buys)} trades) | "
-                              f"SELL: {s_wr}% win rate ({len(sells)} trades). "
-                              f"One direction is clearly stronger.",
-                "confidence": "Low" if len(trades) < 15 else "Medium",
-                "action":     f"Prioritize {better} setups. Be more selective on "
-                              f"{'SELL' if better=='BUY' else 'BUY'} entries.",
-                "evidence":   f"Based on {len(trades)} completed trades",
-            })
-
-    # High confidence vs low confidence
-    high_c = [t for t in trades if int(t.get("confidence",0)) >= 80]
-    low_c  = [t for t in trades if int(t.get("confidence",0)) < 80]
-    if high_c and low_c:
-        hc_wr = _wr(high_c)
-        lc_wr = _wr(low_c)
-        if hc_wr > lc_wr + 15:
-            insights.append({
-                "priority":   "HIGH",
-                "emoji":      "🔥",
-                "title":      f"High confidence trades win more (+{hc_wr-lc_wr:.0f}% difference)",
-                "detail":     f"80%+ confidence: {hc_wr}% win rate ({len(high_c)} trades). "
-                              f"Below 80%: {lc_wr}% win rate ({len(low_c)} trades). "
-                              f"The higher your confidence, the better the outcome.",
-                "confidence": "Medium",
-                "action":     "Consider raising minimum confidence to 80%.",
-                "evidence":   f"Based on {len(trades)} trades",
-            })
-
-    # Exit reason analysis
-    exit_reasons = {}
-    for t in trades:
-        r = t.get("exit_reason","Unknown")
-        if "Stop Loss" in r:     key = "Stop Loss"
-        elif "Take Profit" in r: key = "Take Profit"
-        elif "Partial" in r:     key = "Partial TP"
-        elif "Timeout" in r:     key = "Timeout"
-        elif "Structure" in r:   key = "Structure Invalid"
-        elif "Manual" in r:      key = "Manual Close"
-        else:                    key = "Other"
-        if key not in exit_reasons:
-            exit_reasons[key] = {"count":0,"pl":0}
-        exit_reasons[key]["count"] += 1
-        exit_reasons[key]["pl"]    += float(t.get("pl",0))
-
-    # If manual closes are dominant
-    manual = exit_reasons.get("Manual Close",{})
-    if manual.get("count",0) > len(trades) * 0.4:
-        insights.append({
-            "priority":   "MEDIUM",
-            "emoji":      "⚠️",
-            "title":      f"{manual['count']} trades closed manually ({manual['count']/len(trades)*100:.0f}%)",
-            "detail":     f"Manual closes dominate. This means Aria's automatic "
-                          f"milestones (TP, trail, structure) are not completing the trades. "
-                          f"Either the targets are too far or manual intervention is happening.",
-            "confidence": "High",
-            "action":     "Let Aria's milestones handle exits. Only manually close if "
-                          "market structure clearly reverses.",
-            "evidence":   f"Manual P/L: ${manual['pl']:+.2f} across {manual['count']} trades",
-        })
-
-    return insights
-
-
-# ── Main Generate Function ────────────────────────────────────
 
 def generate() -> list:
-    trades  = load_closed_trades(999)
-    total   = len(trades)
-    target  = 30  # trades needed for reliable analysis
-    recs    = []
+    trades = load_closed_trades(999)
+    total  = len(trades)
+    target = 30
+    recs   = []
 
-    # ── Section 1: Sample size warning ───────────────────────
-    progress = min(int(total / target * 100), 100)
-    bar_fill = "█" * (progress // 10) + "░" * (10 - progress // 10)
-
+    # ── No trades yet ─────────────────────────────────────────
     if total == 0:
         return [{
-            "priority":   "INFO",
-            "emoji":      "🚀",
-            "title":      "Aria is running — waiting for first completed trade",
-            "detail":     "Aria is scanning every 60 seconds. Once a trade "
-                          "closes (via Take Profit, Stop Loss, or timeout), "
-                          "full analysis appears here. Check the Journal page "
-                          "to see open positions.",
-            "confidence": "—",
-            "action":     "No action needed. Let Aria trade.",
-            "evidence":   "0 completed trades",
+            "priority":"INFO","emoji":"🚀",
+            "title":"Aria is running — no completed trades yet",
+            "detail":("Aria scans every 60 seconds. Once a trade closes "
+                      "(via Take Profit, Stop Loss, break-even, or timeout), "
+                      "full analysis appears here.\n\n"
+                      "Check the Journal page to see open positions and "
+                      "what Aria is seeing right now."),
+            "confidence":"—","action":"No action needed. Let Aria trade.",
+            "evidence":"0 completed trades",
         }]
 
     if total < 3:
         return [{
-            "priority":   "INFO",
-            "emoji":      "📊",
-            "title":      f"Collecting data — {total}/30 trades completed",
-            "detail":     f"Need at least 3 completed trades to start analysis. "
-                          f"{3 - total} more to go.",
-            "confidence": "—",
-            "action":     "No action needed. Let Aria trade.",
-            "evidence":   f"{total} completed trade{'s' if total!=1 else ''}",
+            "priority":"INFO","emoji":"📊",
+            "title":f"Collecting data — {total}/3 minimum trades",
+            "detail":f"{3-total} more completed trade(s) needed to begin analysis.",
+            "confidence":"—","action":"No action needed.",
+            "evidence":f"{total} trade(s) recorded",
         }]
 
-    # Stats
-    wins      = [t for t in trades if float(t.get("pl",0)) > 0]
-    losses    = [t for t in trades if float(t.get("pl",0)) < 0]
+    # ── Calculate core stats ──────────────────────────────────
+    wins   = [t for t in trades if float(t.get("pl",0)) > 0]
+    losses = [t for t in trades if float(t.get("pl",0)) < 0]
+    be_trades = [t for t in trades if abs(float(t.get("pl",0))) < 0.15]
+    tp_trades = [t for t in trades
+                 if "Take Profit" in t.get("exit_reason","")
+                 or "Partial" in t.get("exit_reason","")]
+    sl_trades = [t for t in trades if "Stop Loss" in t.get("exit_reason","")]
+    manual_t  = [t for t in trades if "Manual" in t.get("exit_reason","")]
+    timeout_t = [t for t in trades if "Timeout" in t.get("exit_reason","")
+                 or "timeout" in t.get("exit_reason","").lower()]
+    struct_t  = [t for t in trades if "Structure" in t.get("exit_reason","")
+                 or "structure" in t.get("exit_reason","").lower()]
+
     total_pl  = round(sum(float(t.get("pl",0)) for t in trades), 2)
     win_rate  = _wr(trades)
     avg_win   = _avg([float(t.get("pl",0)) for t in wins])
     avg_loss  = _avg([float(t.get("pl",0)) for t in losses])
-    pf        = _profit_factor(trades)
-    best      = max(trades, key=lambda t: float(t.get("pl",0)))
-    worst     = min(trades, key=lambda t: float(t.get("pl",0)))
+    pf        = _pf(trades)
+    expectancy= round((win_rate/100*avg_win)+((1-win_rate/100)*avg_loss),2)
 
-    # Sample size status
-    if total < target:
-        conf_label = "Low" if total < 10 else "Medium"
-        status_emoji = "🟡" if total < 10 else "🟠"
-        recs.append({
-            "priority":   "HIGH",
-            "emoji":      "📊",
-            "title":      f"Sample size: {total}/{target} trades — {conf_label} confidence",
-            "detail":     (f"Current results: {win_rate}% win rate, ${total_pl:+.2f} P/L. "
-                           f"This is {'promising' if total_pl > 0 else 'concerning'} but "
-                           f"{target - total} more trades are needed before conclusions "
-                           f"can be trusted. Do not change rules based on {total} trades.\n\n"
-                           f"Progress: {bar_fill} {total}/{target}"),
-            "confidence": conf_label,
-            "action":     "Keep rules unchanged. Collect more data.",
-            "evidence":   f"{total} completed trades",
-        })
-    else:
-        recs.append({
-            "priority":   "INFO",
-            "emoji":      "✅",
-            "title":      f"Sufficient data — {total} trades analyzed",
-            "detail":     (f"Win rate: {win_rate}% | Total P/L: ${total_pl:+.2f} | "
-                           f"Profit factor: {pf} | Avg win: ${avg_win:+.2f} | "
-                           f"Avg loss: ${avg_loss:+.2f}"),
-            "confidence": "High",
-            "action":     "Review recommendations below carefully.",
-            "evidence":   f"{total} completed trades",
-        })
+    rr_vals   = [float(t.get("rr",0)) for t in trades if float(t.get("rr",0))>0]
+    avg_rr    = _avg(rr_vals)
 
-    # ── Section 2: Overall health ─────────────────────────────
-    health_score = 50
-    if win_rate >= 60:  health_score += 20
-    elif win_rate < 40: health_score -= 20
-    if total_pl > 0:    health_score += 15
-    else:               health_score -= 15
-    if pf > 1.5:        health_score += 15
-    elif pf < 1.0:      health_score -= 15
-    health_score = max(0, min(100, health_score))
-
-    health_label = ("🟢 Healthy" if health_score >= 70
-                    else "🟡 Early Stage" if health_score >= 50
-                    else "🔴 Needs Attention")
-
+    # ── 1. SAMPLE SIZE ────────────────────────────────────────
+    progress  = min(total, target)
+    conf_lbl  = "Very Low" if total<5 else "Low" if total<10 else "Medium" if total<20 else "High"
     recs.append({
-        "priority":   "INFO",
-        "emoji":      "🏥",
-        "title":      f"Engine Health: {health_score}/100 — {health_label}",
-        "detail":     (f"Win Rate: {win_rate}% | P/L: ${total_pl:+.2f} | "
-                       f"Profit Factor: {pf if pf != float('inf') else '∞'} | "
-                       f"Best trade: ${float(best.get('pl',0)):+.2f} | "
-                       f"Worst trade: ${float(worst.get('pl',0)):+.2f} | "
-                       f"Avg Win: ${avg_win:+.2f} | Avg Loss: ${avg_loss:+.2f}"),
-        "confidence": "Medium" if total < 20 else "High",
-        "action":     ("Keep current rules." if health_score >= 70
-                       else "Review engine health issues below."),
-        "evidence":   f"{total} trades, {len(wins)} wins, {len(losses)} losses",
+        "priority":"HIGH" if total<target else "INFO",
+        "emoji":"📊",
+        "title":f"Sample Size: {total}/{target} trades — Confidence {conf_lbl}",
+        "detail":(
+            f"Progress: {_bar(total,target)} {total}/{target}\n\n"
+            f"Current results: {win_rate}% win rate | ${total_pl:+.2f} P/L | "
+            f"Profit factor: {pf if pf!=999.0 else '∞'}\n\n"
+            + (f"⚠️ Only {total} trades is NOT enough to validate a strategy. "
+               f"Do not change rules yet. Keep collecting data."
+               if total < target else
+               f"✅ Sufficient data for reliable analysis.")
+        ),
+        "confidence":conf_lbl,
+        "action":("Keep rules unchanged. Collect more data." if total<target
+                  else "Review all recommendations carefully."),
+        "evidence":f"{total} completed trades",
     })
 
-    # ── Section 3: Risk/Reward analysis ──────────────────────
-    rr_vals = [float(t.get("rr",0)) for t in trades if float(t.get("rr",0)) > 0]
-    avg_rr  = _avg(rr_vals)
-    if avg_rr > 0:
-        expectancy = round((win_rate/100 * avg_win) + ((1-win_rate/100) * avg_loss), 2)
-        recs.append({
-            "priority":   "MEDIUM" if expectancy < 0 else "INFO",
-            "emoji":      "💰",
-            "title":      f"Expectancy: ${expectancy:+.2f} per trade | Avg R:R 1:{avg_rr:.2f}",
-            "detail":     (f"Expectancy shows average profit per trade. "
-                           f"${expectancy:+.2f} means on average each trade "
-                           f"{'makes' if expectancy > 0 else 'loses'} ${abs(expectancy):.2f}. "
-                           f"Positive expectancy = edge. Negative = no edge yet."),
-            "confidence": "Low" if total < 10 else "Medium",
-            "action":     ("Good edge developing." if expectancy > 0
-                           else "Negative expectancy — review entry quality."),
-            "evidence":   f"Calculated from {len(rr_vals)} completed trades",
-        })
+    # ── 2. ENGINE HEALTH (separate from strategy) ─────────────
+    engine_score = 100
+    engine_issues = []
 
-    # ── Section 4: Engine health checks ──────────────────────
+    # Check for journal entries to detect glitches
     try:
         journal = load_journal()
+        open_entries = [j for j in journal if j.get("action")=="OPEN"]
+        # Low confidence opens
+        low_conf = [j for j in open_entries if int(j.get("confidence",100)) < 60]
+        if low_conf:
+            engine_score -= 20
+            engine_issues.append(f"{len(low_conf)} trades opened below 60% confidence — possible rule bypass")
+        # Zero trend strength opens
+        zero_str = [j for j in open_entries if int(j.get("strength",100)) < 10]
+        if zero_str:
+            engine_score -= 25
+            engine_issues.append(f"{len(zero_str)} trades opened with near-zero trend strength — this was the glitch causing bad entries")
     except Exception:
-        journal = []
+        pass
 
-    issues = check_engine_health(trades, journal)
-    for issue in issues:
+    # Check for losing streaks
+    recent_pl = [float(t.get("pl",0)) for t in trades[-10:]]
+    streak = cur_streak = 0
+    for pl in recent_pl:
+        if pl < 0: cur_streak += 1; streak = max(streak, cur_streak)
+        else: cur_streak = 0
+    if streak >= 3:
+        engine_score -= 30
+        engine_issues.append(f"Losing streak of {streak} in last 10 trades")
+
+    strategy_score = min(100, int(
+        (win_rate * 0.4) +
+        (min(pf if pf!=999.0 else 3, 3) / 3 * 30) +
+        (30 if expectancy > 0 else 0)
+    ))
+
+    recs.append({
+        "priority":"HIGH" if engine_score<70 else "INFO",
+        "emoji":"🏥",
+        "title":f"Engine Health: {engine_score}/100 | Strategy Confidence: {strategy_score}/100",
+        "detail":(
+            f"ENGINE HEALTH (is the bot working correctly?): {engine_score}/100\n"
+            + ("\n".join(f"  ⚠️ {i}" for i in engine_issues) if engine_issues
+               else "  ✅ No glitches detected\n")
+            + f"\n\nSTRATEGY CONFIDENCE (is the strategy profitable?): {strategy_score}/100\n"
+            f"  Win Rate: {win_rate}%\n"
+            f"  Profit Factor: {pf if pf!=999.0 else '∞'}\n"
+            f"  Expectancy: ${expectancy:+.2f} per trade\n"
+            f"  Avg Win: ${avg_win:+.2f} | Avg Loss: ${avg_loss:+.2f}"
+        ),
+        "confidence":conf_lbl,
+        "action":("Fix engine issues above first." if engine_issues
+                  else "Engine running correctly."),
+        "evidence":f"Based on {total} trades",
+    })
+
+    # ── 3. WIN vs TARGET HIT (most important distinction) ─────
+    tp_count  = len(tp_trades)
+    be_count  = len(be_trades)
+    sl_count  = len(sl_trades)
+    win_count = len(wins)
+
+    # Target capture rate
+    target_rate = round(tp_count/max(total,1)*100,1)
+    be_rate     = round(be_count/max(total,1)*100,1)
+
+    exit_detail = (
+        f"EXIT BREAKDOWN — this is what's ACTUALLY happening:\n\n"
+        f"  Take Profit hit:    {tp_count}/{total} trades ({target_rate}%)\n"
+        f"  Break-Even exit:    {be_count}/{total} trades ({be_rate}%)\n"
+        f"  Stop Loss hit:      {sl_count}/{total} trades ({round(sl_count/max(total,1)*100,1)}%)\n"
+        f"  Manual close:       {len(manual_t)}/{total} trades\n"
+        f"  Timeout:            {len(timeout_t)}/{total} trades\n"
+        f"  Structure invalid:  {len(struct_t)}/{total} trades\n\n"
+        f"  WIN RATE: {win_rate}% ({win_count} wins)\n"
+        f"  TARGET HIT RATE: {target_rate}% ({tp_count} targets)\n\n"
+        + ("⚠️ WIN ≠ TARGET HIT. Most wins came from break-even, not the planned target. "
+           "The entries are producing positive movement but trades are not reaching their intended targets. "
+           "This means exit management may need review, NOT entry rules."
+           if be_count > tp_count else
+           "✅ Trades are reaching their intended targets.")
+    )
+
+    be_priority = "HIGH" if be_count > total*0.5 and tp_count == 0 else "MEDIUM" if be_count > tp_count else "INFO"
+    recs.append({
+        "priority": be_priority,
+        "emoji":"🎯",
+        "title":f"Exit Quality: {target_rate}% targets hit | {be_rate}% break-even exits",
+        "detail": exit_detail,
+        "confidence": conf_lbl,
+        "action":(
+            "DO NOT change entry rules. The entries are working. "
+            "Investigate whether break-even triggers too early relative to ATR and structure."
+            if be_count > tp_count else
+            "Exit management is working well."
+        ),
+        "evidence":f"TP: {tp_count} | BE: {be_count} | SL: {sl_count} of {total} trades",
+    })
+
+    # ── 4. Break-even efficiency analysis ─────────────────────
+    if be_count >= 2:
         recs.append({
-            "priority":   issue["priority"],
-            "emoji":      "⚠️" if issue["priority"]=="HIGH" else "🔍",
-            "title":      issue["title"],
-            "detail":     issue["detail"],
-            "confidence": "High",
-            "action":     issue["action"],
-            "evidence":   f"Detected in trade history",
+            "priority":"MEDIUM",
+            "emoji":"⚡",
+            "title":f"Break-Even Analysis: {be_count} trades exited at break-even",
+            "detail":(
+                f"Break-even protection triggered {be_count} times.\n\n"
+                f"This means Aria correctly protected the trades from turning into losses. "
+                f"However, {be_count} trades that moved in the right direction "
+                f"ended at $0 profit instead of hitting the take profit target.\n\n"
+                f"Possible causes:\n"
+                f"  1. Break-even triggers too early — price pulls back before continuing\n"
+                f"  2. Take profit target is too far for current volatility\n"
+                f"  3. Market is in consolidation — moves stall before target\n"
+                f"  4. Entry timing is slightly late in the move\n\n"
+                f"Current BE trigger: +$2 profit → SL moves to entry\n"
+                f"Current TP target: ~2.5x ATR from entry\n\n"
+                f"DO NOT change until 20+ trades collected."
+            ),
+            "confidence":"Low" if total<15 else "Medium",
+            "action":"Monitor for 20+ trades before adjusting BE trigger.",
+            "evidence":f"{be_count} break-even exits of {total} total",
         })
 
-    # ── Section 5: Pattern discovery ─────────────────────────
-    patterns = discover_patterns(trades)
-    recs.extend(patterns)
+    # ── 5. Risk/Reward Analysis ───────────────────────────────
+    if rr_vals:
+        recs.append({
+            "priority":"INFO",
+            "emoji":"💰",
+            "title":f"Risk/Reward: Avg 1:{avg_rr:.2f} | Expectancy ${expectancy:+.2f}/trade",
+            "detail":(
+                f"Average planned R:R: 1:{avg_rr:.2f} (minimum required: 1:1.8)\n"
+                f"Expectancy: ${expectancy:+.2f} per trade\n"
+                f"  Positive expectancy = the strategy has a mathematical edge\n"
+                f"  Negative expectancy = losing money long term on average\n\n"
+                f"Profit Factor: {pf if pf!=999.0 else '∞'}\n"
+                f"  > 1.5 = good | > 2.0 = excellent | < 1.0 = losing strategy\n\n"
+                f"Average winner: ${avg_win:+.2f}\n"
+                f"Average loser:  ${avg_loss:+.2f}\n"
+                f"Best trade:     ${float(max(trades,key=lambda t:float(t.get('pl',0))).get('pl',0)):+.2f}\n"
+                f"Worst trade:    ${float(min(trades,key=lambda t:float(t.get('pl',0))).get('pl',0)):+.2f}"
+            ),
+            "confidence":conf_lbl,
+            "action":"Keep R:R minimum at 1.8. Review if avg drops below 1.5.",
+            "evidence":f"{len(rr_vals)} trades with R:R data",
+        })
 
-    # ── Section 6: Market condition tracking ─────────────────
+    # ── 6. Pattern Discovery ──────────────────────────────────
+    btc_t = [t for t in trades if t.get("symbol","")=="BTCUSD"]
+    eth_t = [t for t in trades if t.get("symbol","")=="ETHUSD"]
+    buy_t = [t for t in trades if t.get("side","")=="BUY"]
+    sell_t= [t for t in trades if t.get("side","")=="SELL"]
+
+    if btc_t and eth_t:
+        btc_wr = _wr(btc_t); eth_wr = _wr(eth_t)
+        btc_pl = round(sum(float(t.get("pl",0)) for t in btc_t),2)
+        eth_pl = round(sum(float(t.get("pl",0)) for t in eth_t),2)
+        if abs(btc_wr-eth_wr) >= 20:
+            better = "BTC" if btc_wr>eth_wr else "ETH"
+            recs.append({
+                "priority":"MEDIUM","emoji":"📈",
+                "title":f"{better} performing significantly better",
+                "detail":(f"BTC: {btc_wr}% WR ({len(btc_t)} trades) ${btc_pl:+.2f}\n"
+                          f"ETH: {eth_wr}% WR ({len(eth_t)} trades) ${eth_pl:+.2f}\n\n"
+                          f"Difference of {abs(btc_wr-eth_wr):.0f}% is meaningful."),
+                "confidence":"Low" if total<15 else "Medium",
+                "action":f"Prioritize {better} setups.",
+                "evidence":f"{len(btc_t)} BTC + {len(eth_t)} ETH trades",
+            })
+
+    if buy_t and sell_t and abs(_wr(buy_t)-_wr(sell_t)) >= 25:
+        better = "BUY" if _wr(buy_t)>_wr(sell_t) else "SELL"
+        recs.append({
+            "priority":"MEDIUM","emoji":"🎯",
+            "title":f"{better} trades outperforming significantly",
+            "detail":(f"BUY: {_wr(buy_t)}% WR ({len(buy_t)} trades)\n"
+                      f"SELL: {_wr(sell_t)}% WR ({len(sell_t)} trades)"),
+            "confidence":"Low" if total<15 else "Medium",
+            "action":f"Be more selective on {'SELL' if better=='BUY' else 'BUY'} entries.",
+            "evidence":f"{len(buy_t)} buys + {len(sell_t)} sells",
+        })
+
+    # ── 7. Market Condition Tracking ──────────────────────────
+    bull_t = [t for t in trades if "Bullish" in t.get("trend","")]
+    bear_t = [t for t in trades if "Bearish" in t.get("trend","")]
     recs.append({
-        "priority":   "INFO",
-        "emoji":      "🧠",
-        "title":      "Market Condition Tracking",
-        "detail":     (f"Aria is tracking performance across:\n"
-                       f"• Bullish structure: {len([t for t in trades if 'Bullish' in t.get('trend','')])}/{total} trades\n"
-                       f"• Bearish structure: {len([t for t in trades if 'Bearish' in t.get('trend','')])}/{total} trades\n"
-                       f"• BTC trades: {len([t for t in trades if t.get('symbol','')=='BTCUSD'])}/{total}\n"
-                       f"• ETH trades: {len([t for t in trades if t.get('symbol','')=='ETHUSD'])}/{total}\n"
-                       f"• BUY trades: {len([t for t in trades if t.get('side','')=='BUY'])}/{total}\n"
-                       f"• SELL trades: {len([t for t in trades if t.get('side','')=='SELL'])}/{total}\n\n"
-                       f"Status: {'Learning' if total < target else 'Analyzing'}"),
-        "confidence": "Low" if total < target else "Medium",
-        "action":     f"{'Collect ' + str(target-total) + ' more trades for reliable patterns.' if total < target else 'Patterns available — see above.'}",
-        "evidence":   f"{total} trades analyzed",
+        "priority":"INFO","emoji":"🧠",
+        "title":"Market Condition Tracking — Learning",
+        "detail":(
+            f"Aria is tracking performance across conditions:\n\n"
+            f"  Bullish structure: {len(bull_t)}/{total} trades | {_wr(bull_t)}% WR\n"
+            f"  Bearish structure: {len(bear_t)}/{total} trades | {_wr(bear_t)}% WR\n"
+            f"  BTC: {len(btc_t)}/{total} | ETH: {len(eth_t)}/{total}\n"
+            f"  BUY: {len(buy_t)}/{total} | SELL: {len(sell_t)}/{total}\n\n"
+            f"Status: {'Learning' if total<target else 'Pattern analysis available'}\n"
+            f"Need {max(0,target-total)} more trades for reliable patterns."
+        ),
+        "confidence":conf_lbl,
+        "action":f"{'Continue collecting data.' if total<target else 'Review patterns above.'}",
+        "evidence":f"{total}/{target} trades collected",
     })
 
     return recs
