@@ -235,14 +235,36 @@ def _tf_rows(frames):
 
 def _patterns_html(patterns):
     if not patterns:
-        return "<span style='color:#333;font-size:13px'>No significant pattern detected</span>"
+        return "<span style='color:#333;font-size:13px'>No significant pattern detected on any timeframe</span>"
+    # Priority: 4H and Daily with High reliability first (most meaningful)
+    priority = [p for p in patterns
+                if p.get("timeframe") in ("4H","Daily")
+                and p.get("reliability","") in ("High","Medium-High")]
+    # Fallback: 1H with high reliability
+    if not priority:
+        priority = [p for p in patterns
+                    if p.get("timeframe") == "1H"
+                    and p.get("reliability","") in ("High","Medium-High")]
+    # Last resort: any pattern
+    display = priority if priority else patterns[:2]
+    if not display:
+        return "<span style='color:#333;font-size:13px'>No high-probability patterns detected</span>"
     out = ""
-    for p in patterns:
-        c = "#2ecc71" if p["direction"]=="Bullish" else ("#e74c3c" if p["direction"]=="Bearish" else "#555")
-        out += (f"<div style='padding:6px 0;border-bottom:1px solid #141414'>"
-                f"<span style='color:{c};font-weight:bold'>{p['name']}</span>"
-                f"<span style='color:#333;font-size:11px;margin-left:8px'>"
-                f"{p['direction']} · {p['strength']} · Reliability: {p['reliability']}</span></div>")
+    for p in display:
+        c  = "#2ecc71" if p["direction"]=="Bullish" else ("#e74c3c" if p["direction"]=="Bearish" else "#555")
+        tf = p.get("timeframe","")
+        # Timeframe badge color
+        tf_c = "#f7931a" if tf=="Daily" else "#9b59b6" if tf=="4H" else "#3498db" if tf=="1H" else "#555"
+        tf_badge = f"<span style='background:{tf_c}22;color:{tf_c};font-size:9px;padding:2px 6px;border-radius:3px;margin-left:6px'>{tf}</span>" if tf else ""
+        out += (
+            f"<div style='padding:8px;background:#0d0d0d;border-radius:6px;"
+            f"border-left:3px solid {c};margin-bottom:6px'>"
+            f"<div style='display:flex;align-items:center'>"
+            f"<span style='color:{c};font-weight:bold;font-size:13px'>{p['name']}</span>"
+            f"{tf_badge}</div>"
+            f"<div style='font-size:11px;color:#444;margin-top:3px'>"
+            f"{p['direction']} · {p['strength']} · Reliability: {p['reliability']}</div></div>"
+        )
     return out
 
 def _fvg_html(fvgs):
@@ -1182,42 +1204,52 @@ async def intelligence_page(symbol: str = "BTCUSD"):
 
     try:
         intel = get_intelligence(symbol)
-    except Exception as e:
+    except Exception:
         intel = {}
 
-    fg      = intel.get("fg",      {"value":50,"label":"N/A","signal":"NEUTRAL","change":0,"history":[],"available":False})
+    fg      = intel.get("fg",      {"value":50,"label":"Loading...","change":0,"history":[],"signal":"NEUTRAL","available":False})
     markets = intel.get("markets", {"btc_dominance":0,"eth_dominance":0,"total_mcap":0,"mcap_change":0,"dxy":0,"dxy_change":0,"dxy_available":False,"available":False})
-    coin    = intel.get("coin",    {"price":0,"change_24h":0,"volume_24h":0,"high_24h":0,"low_24h":0,"market_cap":0,"ath":0,"ath_change":0,"available":False})
+    coin    = intel.get("coin",    {"price":0,"change_24h":0,"volume_24h":0,"high_24h":0,"low_24h":0,"available":False})
     funding = intel.get("funding", {"rate":0,"annualized":0,"signal":"NEUTRAL","available":False})
-    oi      = intel.get("oi",      {"value_usd":0,"change_24h":0,"signal":"STABLE","available":False})
-    ls      = intel.get("ls",      {"longs":50,"shorts":50,"signal":"BALANCED","available":False})
+    oi      = intel.get("oi",      {"value_usd":0,"change_24h":0,"history":[],"signal":"STABLE","available":False})
+    ls      = intel.get("ls",      {"longs":50,"shorts":50,"history":[],"signal":"BALANCED","available":False})
     liq     = intel.get("liq",     {"longs_usd":0,"shorts_usd":0,"signal":"NEUTRAL","available":False})
     news    = intel.get("news",    [])
     whales  = intel.get("whales",  [])
     events  = intel.get("events",  [])
-    regime  = intel.get("regime",  {"score":50,"regime":"NEUTRAL","color":"#888","confidence":50,"primary":"No data","risk":"No data","bull_factors":[],"bear_factors":[]})
+    regime  = intel.get("regime",  {"score":50,"regime":"NEUTRAL","color":"#888","confidence":50,"primary":"Loading...","risk":"Loading...","bull_factors":[],"bear_factors":[]})
     ts      = intel.get("timestamp","")
 
     coin_name = "Bitcoin" if "BTC" in symbol else "Ethereum"
+    tv_sym    = "BITSTAMP:BTCUSD" if "BTC" in symbol else "BITSTAMP:ETHUSD"
     other_sym = "ETHUSD" if "BTC" in symbol else "BTCUSD"
     other_name= "ETH" if "BTC" in symbol else "BTC"
 
-    def na(v, fmt=""):
-        if not v: return "N/A"
-        if fmt: return fmt.format(v)
-        return str(v)
-
     def sc(v):
         return "#2ecc71" if v > 0 else "#e74c3c" if v < 0 else "#888"
-
     def sig_c(s):
-        good = {"BULLISH","EXTREME_FEAR","OVERHEATED_SHORTS","FROM_EXCHANGE",
-                "STRONG_EXPANSION","EXPANDING","CROWDED_SHORTS","SHORTS_DOMINANT"}
-        bad  = {"BEARISH","EXTREME_GREED","OVERHEATED_LONGS","TO_EXCHANGE",
-                "STRONG_CONTRACTION","CONTRACTING","CROWDED_LONGS","LONGS_DOMINANT"}
-        return "#2ecc71" if s in good else "#e74c3c" if s in bad else "#888"
+        g={"BULLISH","EXTREME_FEAR","OVERHEATED_SHORTS","CROWDED_SHORTS","FROM_EXCHANGE","STRONG_EXPANSION","EXPANDING"}
+        b={"BEARISH","EXTREME_GREED","OVERHEATED_LONGS","CROWDED_LONGS","TO_EXCHANGE","STRONG_CONTRACTION","CONTRACTING"}
+        return "#2ecc71" if s in g else "#e74c3c" if s in b else "#888"
+    def na_str(v, fmt="", suffix=""):
+        if v is None or v == 0: return "—"
+        if fmt: return fmt.format(v) + suffix
+        return str(v) + suffix
+    def avail_c(available):
+        return "" if available else " style='color:#444'"
 
-    # Build news HTML
+    fgv = fg.get("value",50)
+    fgc = ("#00bfff" if fgv<=25 else "#2ecc71" if fgv<=45
+           else "#888" if fgv<=55 else "#f39c12" if fgv<=75 else "#e74c3c")
+
+    # Sparkline helper
+    def sparkline(hist, color="#2ecc71"):
+        if len(hist) < 2: return ""
+        mx = max(hist) or 1; mn = min(hist); rng = mx-mn or 1
+        pts = " ".join(f"{i*10},{80-int((v-mn)/rng*70)}" for i,v in enumerate(hist))
+        return f'<svg viewBox="0 0 {len(hist)*10} 80" style="width:100%;height:35px;margin-top:6px"><polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.5"/></svg>'
+
+    # News HTML
     news_html = ""
     for n in news[:20]:
         sent = n.get("sentiment","NEUTRAL")
@@ -1226,17 +1258,14 @@ async def intelligence_page(symbol: str = "BTCUSD"):
         url  = n.get("url","")
         lnk  = f' <a href="{url}" target="_blank" style="color:#2ecc71;font-size:10px">Read →</a>' if url else ""
         news_html += (
-            f'<div style="border-left:3px solid {nc};padding:10px 12px;'
-            f'margin-bottom:8px;background:#0d0d0d;border-radius:0 6px 6px 0">'
-            f'<div style="font-size:13px;color:#ccc;line-height:1.5">{n.get("title","")}{hot}{lnk}</div>'
-            f'<div style="margin-top:4px;font-size:10px;color:#333">'
-            f'{n.get("source","")} · {n.get("published","")} · '
-            f'<span style="color:{nc}">{sent}</span></div></div>'
+            f'<div style="border-left:3px solid {nc};padding:10px 12px;margin-bottom:8px;background:#0d0d0d;border-radius:0 6px 6px 0">' +
+            f'<div style="font-size:13px;color:#ccc;line-height:1.5">{n.get("title","")}{hot}{lnk}</div>' +
+            f'<div style="margin-top:4px;font-size:10px;color:#333">{n.get("source","")} · {n.get("published","")} · <span style="color:{nc}">{sent}</span></div></div>'
         )
     if not news_html:
-        news_html = '<div style="color:#444;padding:16px">No news available. Refreshes every 2 minutes.</div>'
+        news_html = '<div style="color:#444;padding:16px;font-size:13px">Loading news... Refreshes every 2 minutes.</div>'
 
-    # Build whale HTML
+    # Whale HTML
     whale_html = ""
     for w in whales[:10]:
         sig = w.get("signal","NEUTRAL")
@@ -1244,192 +1273,170 @@ async def intelligence_page(symbol: str = "BTCUSD"):
         url = w.get("url","")
         lnk = f' <a href="{url}" target="_blank" style="color:#2ecc71;font-size:10px">→</a>' if url else ""
         whale_html += (
-            f'<div style="padding:8px 12px;border-bottom:1px solid #141414;font-size:12px;color:#ccc">'
-            f'{ico} {w.get("title","")[:80]}{lnk}'
-            f'<span style="color:#333;font-size:10px;float:right">{w.get("published","")}</span></div>'
+            f'<div style="padding:8px 12px;border-bottom:1px solid #141414;font-size:12px;color:#ccc;display:flex;justify-content:space-between">' +
+            f'<span>{ico} {w.get("title","")[:75]}{lnk}</span>' +
+            f'<span style="color:#333;font-size:10px;margin-left:8px;white-space:nowrap">{w.get("published","")}</span></div>'
         )
     if not whale_html:
-        whale_html = '<div style="color:#444;padding:16px;font-size:12px">No whale transactions detected.</div>'
+        whale_html = '<div style="color:#444;padding:16px;font-size:12px">Loading whale data...</div>'
 
-    # Build events HTML
+    # Events HTML
     evt_html = ""
     for e in events[:6]:
         url = e.get("url","")
         lnk = f' <a href="{url}" target="_blank" style="color:#f39c12;font-size:10px">→</a>' if url else ""
         evt_html += (
-            f'<div style="background:#1a0f00;border:1px solid #3a2500;'
-            f'border-radius:6px;padding:10px;margin-bottom:8px">'
-            f'<div style="font-size:12px;color:#f39c12">{e.get("title","")}{lnk}</div>'
-            f'<div style="font-size:10px;color:#555;margin-top:3px">{e.get("source","")} · {e.get("published","")}</div>'
-            f'</div>'
+            f'<div style="background:#1a0f00;border:1px solid #3a2500;border-radius:6px;padding:10px;margin-bottom:8px">' +
+            f'<div style="font-size:12px;color:#f39c12">{e.get("title","")}{lnk}</div>' +
+            f'<div style="font-size:10px;color:#555;margin-top:3px">{e.get("source","")} · {e.get("published","")}</div></div>'
         )
     if not evt_html:
-        evt_html = '<div style="color:#444;padding:10px;font-size:12px">No high-impact events today.</div>'
+        evt_html = '<div style="color:#444;padding:10px;font-size:12px">No high-impact events detected.</div>'
 
-    # Bull/bear factors
     bull_html = "".join(f'<div style="padding:3px 0;font-size:12px;color:#2ecc71">✓ {b}</div>' for b in regime["bull_factors"])
     bear_html = "".join(f'<div style="padding:3px 0;font-size:12px;color:#e74c3c">✗ {b}</div>' for b in regime["bear_factors"])
-    if not bull_html: bull_html = '<div style="color:#333;font-size:12px">No bullish factors</div>'
-    if not bear_html: bear_html = '<div style="color:#333;font-size:12px">No bearish factors</div>'
+    if not bull_html: bull_html = '<div style="color:#333;font-size:12px">No bullish factors detected</div>'
+    if not bear_html: bear_html = '<div style="color:#333;font-size:12px">No bearish factors detected</div>'
 
-    fgv = fg.get("value",50)
-    fgc = ("#00bfff" if fgv<=25 else "#2ecc71" if fgv<=45
-           else "#888" if fgv<=55 else "#f39c12" if fgv<=75 else "#e74c3c")
+    dxy_display  = f'{markets["dxy"]:.2f}' if markets.get("dxy_available") else "N/A"
+    dxy_chg_disp = f'{markets["dxy_change"]:+.3f}' if markets.get("dxy_available") else ""
 
-    # F&G history sparkline
-    fg_hist = fg.get("history",[])
-    fg_spark = ""
-    if fg_hist:
-        mx = max(fg_hist) or 100
-        pts = " ".join(f"{i*14},{100-int(v/mx*90)}" for i,v in enumerate(fg_hist))
-        fg_spark = f'<svg viewBox="0 0 {len(fg_hist)*14} 100" style="width:100%;height:40px;margin-top:8px"><polyline points="{pts}" fill="none" stroke="{fgc}" stroke-width="2"/></svg>'
-
-    # OI history sparkline
-    oi_hist = oi.get("history",[])
-    oi_spark = ""
-    if len(oi_hist) >= 2:
-        mx = max(oi_hist) or 1
-        mn = min(oi_hist)
-        rng = mx - mn or 1
-        pts = " ".join(f"{i*8},{100-int((v-mn)/rng*90)}" for i,v in enumerate(oi_hist))
-        oi_c = "#2ecc71" if oi["change_24h"] > 0 else "#e74c3c"
-        oi_spark = f'<svg viewBox="0 0 {len(oi_hist)*8} 100" style="width:100%;height:40px;margin-top:8px"><polyline points="{pts}" fill="none" stroke="{oi_c}" stroke-width="2"/></svg>'
-
-    # L/S history sparkline
-    ls_hist = ls.get("history",[])
-    ls_spark = ""
-    if len(ls_hist) >= 2:
-        pts = " ".join(f"{i*8},{100-int(v)}" for i,v in enumerate(ls_hist))
-        ls_spark = f'<svg viewBox="0 0 {len(ls_hist)*8} 100" style="width:100%;height:40px;margin-top:8px"><polyline points="{pts}" fill="none" stroke="#3498db" stroke-width="2"/></svg>'
-
-    dxy_val = f'{markets["dxy"]:.2f}' if markets.get("dxy_available") else "N/A"
-    dxy_chg = f'{markets["dxy_change"]:+.3f}' if markets.get("dxy_available") else ""
-    dxy_c   = sc(-markets.get("dxy_change",0))  # DXY down = good for crypto
+    # Metric cards data
+    fund_rate  = f'{funding["rate"]:+.4f}%' if funding.get("available") else "Loading..."
+    fund_ann   = f'Ann {funding["annualized"]:+.1f}%' if funding.get("available") else ""
+    fund_sig   = funding["signal"].replace("_"," ") if funding.get("available") else "Connecting..."
+    oi_val     = f'${oi["value_usd"]:.2f}B' if oi.get("available") and oi["value_usd"]>0 else "Loading..."
+    oi_chg     = f'{oi["change_24h"]:+.2f}% 24h' if oi.get("available") else ""
+    ls_long    = f'{ls["longs"]:.1f}%' if ls.get("available") else "Loading..."
+    ls_short   = f'{ls["shorts"]:.1f}%' if ls.get("available") else ""
+    liq_l      = f'${liq["longs_usd"]:.1f}M' if liq.get("available") else "Loading..."
+    liq_s      = f'${liq["shorts_usd"]:.1f}M' if liq.get("available") else ""
+    price_disp = f'${coin["price"]:,.2f}' if coin.get("available") and coin["price"]>0 else "Loading..."
+    chg_disp   = f'{coin["change_24h"]:+.2f}%' if coin.get("available") else ""
 
     html = (
-        '<!DOCTYPE html><html><head>'
-        '<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<meta http-equiv="refresh" content="120">'
-        f'<title>Aria Intel · {symbol}</title>'
-        + base_css() +
-        '<style>'
-        '.ig{display:grid;grid-template-columns:1fr 340px;gap:14px;padding:14px}'
-        '.mg{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;padding:14px}'
-        '.mc{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:14px;text-align:center}'
-        '.mv{font-size:20px;font-weight:bold;margin:4px 0}'
-        '.ml{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:1px}'
-        '.ms{font-size:11px;color:#555;margin-top:3px}'
-        '.sec{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:2px;'
-        'padding-bottom:8px;border-bottom:1px solid #111;margin-bottom:10px}'
-        '@media(max-width:760px){.ig{grid-template-columns:1fr}}'
-        '</style></head><body>'
-        + _topbar("","intel") +
+        '<!DOCTYPE html><html><head>' +
+        '<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+        '<meta http-equiv="refresh" content="120">' +
+        f'<title>Aria Intel · {symbol}</title>' +
+        base_css() +
+        '<style>' +
+        '.ig{display:grid;grid-template-columns:1fr 340px;gap:14px;padding:14px}' +
+        '.mg{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;padding:14px}' +
+        '.mc{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:14px}' +
+        '.mv{font-size:18px;font-weight:bold;margin:4px 0}' +
+        '.ml{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:1px}' +
+        '.ms{font-size:11px;color:#555;margin-top:2px}' +
+        '.sec{font-size:10px;color:#444;text-transform:uppercase;letter-spacing:2px;padding-bottom:8px;border-bottom:1px solid #111;margin-bottom:10px}' +
+        '@media(max-width:760px){.ig{grid-template-columns:1fr}}' +
+        '</style></head><body>' +
+        _topbar("","intel") +
         # Symbol switcher
-        f'<div style="padding:10px 14px;display:flex;gap:8px">'
-        f'<a href="/intelligence?symbol={symbol}" style="padding:6px 16px;background:#1a2e1a;'
-        f'border:1px solid #2ecc71;border-radius:20px;color:#2ecc71;font-size:12px;text-decoration:none">'
-        f'{"₿" if "BTC" in symbol else "Ξ"} {coin_name}</a>'
-        f'<a href="/intelligence?symbol={other_sym}" style="padding:6px 16px;'
-        f'background:#111;border:1px solid #1a1a1a;border-radius:20px;color:#555;'
-        f'font-size:12px;text-decoration:none">{other_name}</a>'
-        f'<span style="margin-left:auto;font-size:11px;color:#333">Updated {ts} · Auto-refresh 2min</span>'
-        f'</div>'
-        # Regime score hero
-        f'<div style="margin:0 14px 14px;background:#111;border:1px solid #1a1a1a;'
-        f'border-radius:12px;padding:20px;display:grid;'
-        f'grid-template-columns:auto 1fr;gap:20px;align-items:center">'
-        f'<div style="text-align:center">'
-        f'<div style="font-size:52px;font-weight:bold;color:{regime["color"]}">{regime["score"]}</div>'
-        f'<div style="font-size:10px;color:#444;letter-spacing:2px">SCORE / 100</div>'
-        f'</div>'
-        f'<div>'
-        f'<div style="font-size:22px;font-weight:bold;color:{regime["color"]};margin-bottom:8px">'
-        f'{regime["regime"]}</div>'
-        f'<div style="font-size:12px;color:#555;line-height:2">'
-        f'Confidence: <b style="color:#fff">{regime["confidence"]}%</b><br>'
-        f'Primary driver: <span style="color:#2ecc71">{regime["primary"]}</span><br>'
-        f'Key risk: <span style="color:#e74c3c">{regime["risk"]}</span>'
-        f'</div></div></div>'
+        f'<div style="padding:10px 14px;display:flex;gap:8px;align-items:center">' +
+        f'<a href="/intelligence?symbol={symbol}" style="padding:6px 16px;background:#1a2e1a;border:1px solid #2ecc71;border-radius:20px;color:#2ecc71;font-size:12px;text-decoration:none">{"₿" if "BTC" in symbol else "Ξ"} {coin_name} Intel</a>' +
+        f'<a href="/intelligence?symbol={other_sym}" style="padding:6px 16px;background:#111;border:1px solid #1a1a1a;border-radius:20px;color:#555;font-size:12px;text-decoration:none">{other_name}</a>' +
+        f'<span style="margin-left:auto;font-size:11px;color:#333">Updated {ts} · Refreshes every 2 min</span></div>' +
+        # Regime hero
+        f'<div style="margin:0 14px 14px;background:#111;border:1px solid #1a1a1a;border-radius:12px;padding:20px;display:grid;grid-template-columns:auto 1fr;gap:20px;align-items:center">' +
+        f'<div style="text-align:center"><div style="font-size:52px;font-weight:bold;color:{regime["color"]}">{regime["score"]}</div>' +
+        f'<div style="font-size:10px;color:#444;letter-spacing:2px">SCORE / 100</div></div>' +
+        f'<div><div style="font-size:22px;font-weight:bold;color:{regime["color"]};margin-bottom:8px">{regime["regime"]}</div>' +
+        f'<div style="font-size:12px;color:#555;line-height:2">Confidence: <b style="color:#fff">{regime["confidence"]}%</b><br>' +
+        f'Primary: <span style="color:#2ecc71">{regime["primary"]}</span><br>' +
+        f'Risk: <span style="color:#e74c3c">{regime["risk"]}</span></div></div></div>' +
         # Metric cards
-        + '<div class="mg">'
-        + f'<div class="mc"><div class="ml">Fear & Greed</div>'
-        f'<div class="mv" style="color:{fgc}">{fgv}</div>'
-        f'<div class="ms">{fg.get("label","N/A")}</div>'
-        f'<div style="font-size:10px;color:#333">({("+" if fg.get("change",0)>=0 else "")}{fg.get("change",0)} vs yesterday)</div>'
-        f'{fg_spark}</div>'
-        + f'<div class="mc"><div class="ml">BTC Dominance</div>'
-        f'<div class="mv" style="color:#f7931a">{markets["btc_dominance"]}%</div>'
-        f'<div class="ms">ETH {markets["eth_dominance"]}%</div>'
-        f'<div style="font-size:10px;color:#333">Total MCap ${markets["total_mcap"]:.2f}T</div></div>'
-        + f'<div class="mc"><div class="ml">Market Cap 24H</div>'
-        f'<div class="mv" style="color:{sc(markets["mcap_change"])}">{markets["mcap_change"]:+.2f}%</div>'
-        f'<div class="ms">${markets["total_mcap"]:.2f}T</div></div>'
-        + f'<div class="mc"><div class="ml">DXY Dollar</div>'
-        f'<div class="mv" style="color:{dxy_c}">{dxy_val}</div>'
-        f'<div class="ms" style="color:{dxy_c}">{dxy_chg}</div>'
-        f'<div style="font-size:10px;color:#333">DXY down = BTC up</div></div>'
-        + f'<div class="mc"><div class="ml">Funding Rate</div>'
-        f'<div class="mv" style="color:{sig_c(funding["signal"])}">{funding["rate"]:+.4f}%</div>'
-        f'<div class="ms">{funding["signal"].replace("_"," ")}</div>'
-        f'<div style="font-size:10px;color:#333">Ann {funding["annualized"]:+.1f}%</div></div>'
-        + f'<div class="mc"><div class="ml">Open Interest</div>'
-        f'<div class="mv" style="color:#fff">${oi["value_usd"]:.2f}B</div>'
-        f'<div class="ms" style="color:{sc(oi["change_24h"])}">{oi["change_24h"]:+.2f}% 24h</div>'
-        f'{oi_spark}</div>'
-        + f'<div class="mc"><div class="ml">Long / Short</div>'
-        f'<div class="mv" style="color:{sig_c(ls["signal"])}">{ls["longs"]:.1f}%</div>'
-        f'<div class="ms">Longs · {ls["shorts"]:.1f}% Shorts</div>'
-        f'{ls_spark}</div>'
-        + f'<div class="mc"><div class="ml">Liquidations 1H</div>'
-        f'<div class="mv" style="color:#e74c3c">${liq["longs_usd"]:.1f}M</div>'
-        f'<div class="ms" style="color:#2ecc71">Shorts ${liq["shorts_usd"]:.1f}M</div>'
-        f'<div style="font-size:10px;color:{sig_c(liq["signal"])}">{liq["signal"]}</div></div>'
-        + f'<div class="mc"><div class="ml">24H Range</div>'
-        f'<div class="mv" style="color:#fff">${coin["price"]:,.0f}</div>'
-        f'<div class="ms" style="color:{sc(coin["change_24h"])}">{coin["change_24h"]:+.2f}%</div>'
-        f'<div style="font-size:10px;color:#333">H ${coin["high_24h"]:,.0f} L ${coin["low_24h"]:,.0f}</div></div>'
-        + '</div>'
+        '<div class="mg">' +
+        # F&G
+        f'<div class="mc"><div class="ml">Fear & Greed</div><div class="mv" style="color:{fgc}">{fgv}</div>' +
+        f'<div class="ms">{fg.get("label","N/A")}</div>' +
+        f'<div style="font-size:10px;color:#333">{("+" if fg.get("change",0)>=0 else "")}{fg.get("change",0)} vs yesterday</div>' +
+        sparkline(fg.get("history",[]), fgc) + '</div>' +
+        # BTC dominance
+        f'<div class="mc"><div class="ml">BTC Dominance</div><div class="mv" style="color:#f7931a">{markets["btc_dominance"]}%</div>' +
+        f'<div class="ms">ETH {markets["eth_dominance"]}%</div>' +
+        f'<div style="font-size:10px;color:#333">${markets["total_mcap"]:.2f}T total</div></div>' +
+        # Market cap
+        f'<div class="mc"><div class="ml">Market Cap 24H</div>' +
+        f'<div class="mv" style="color:{sc(markets["mcap_change"])}">{markets["mcap_change"]:+.2f}%</div>' +
+        f'<div class="ms">${markets["total_mcap"]:.2f}T</div></div>' +
+        # DXY - TradingView mini chart
+        f'<div class="mc"><div class="ml">DXY Dollar Index</div>' +
+        f'<div class="mv" style="color:{sc(-markets.get("dxy_change",0))}">{dxy_display}</div>' +
+        f'<div class="ms">{dxy_chg_disp}</div>' +
+        f'<div style="font-size:10px;color:#333">DXY↓ = crypto up</div></div>' +
+        # Funding
+        f'<div class="mc"><div class="ml">Funding Rate</div>' +
+        f'<div class="mv" style="color:{sig_c(funding["signal"])}">{fund_rate}</div>' +
+        f'<div class="ms">{fund_sig}</div><div style="font-size:10px;color:#333">{fund_ann}</div></div>' +
+        # OI
+        f'<div class="mc"><div class="ml">Open Interest</div>' +
+        f'<div class="mv" style="color:#fff">{oi_val}</div>' +
+        f'<div class="ms" style="color:{sc(oi.get("change_24h",0))}">{oi_chg}</div>' +
+        sparkline(oi.get("history",[]), "#3498db") + '</div>' +
+        # L/S
+        f'<div class="mc"><div class="ml">Long / Short</div>' +
+        f'<div class="mv" style="color:{sig_c(ls["signal"])}">{ls_long}</div>' +
+        f'<div class="ms">Longs · {ls_short} Shorts</div>' +
+        sparkline(ls.get("history",[]), "#9b59b6") + '</div>' +
+        # Liquidations
+        f'<div class="mc"><div class="ml">Liquidations 1H</div>' +
+        f'<div class="mv" style="color:#e74c3c">{liq_l}</div>' +
+        f'<div class="ms" style="color:#2ecc71">Shorts {liq_s}</div>' +
+        f'<div style="font-size:10px;color:{sig_c(liq["signal"])}">{liq["signal"]}</div></div>' +
+        # Price
+        f'<div class="mc"><div class="ml">{coin_name} Price</div>' +
+        f'<div class="mv" style="color:#fff">{price_disp}</div>' +
+        f'<div class="ms" style="color:{sc(coin.get("change_24h",0))}">{chg_disp}</div>' +
+        f'<div style="font-size:10px;color:#333">H {na_str(coin.get("high_24h",0),"${:,.0f}")} L {na_str(coin.get("low_24h",0),"${:,.0f}")}</div></div>' +
+        '</div>' +
+        # TradingView live chart
+        f'<div style="margin:0 14px 14px;background:#111;border:1px solid #1a1a1a;border-radius:10px;overflow:hidden">' +
+        f'<div style="padding:10px 14px;font-size:10px;color:#444;text-transform:uppercase;letter-spacing:2px">Live Chart — {coin_name}</div>' +
+        f'<div class="tradingview-widget-container" style="height:300px">' +
+        f'<div id="tv_chart"></div>' +
+        f'<script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>' +
+        f'{{"width":"100%","height":300,"symbol":"{tv_sym}","interval":"60","timezone":"Etc/UTC",' +
+        f'"theme":"dark","style":"1","locale":"en","enable_publishing":false,' +
+        f'"allow_symbol_change":false,"container_id":"tv_chart"}}' +
+        '</script></div></div>' +
         # Main grid
-        + '<div class="ig">'
+        '<div class="ig">' +
         # Left: News + Whales
-        + '<div>'
-        + f'<div class="sec">📰 Live News — {coin_name}</div>'
-        + news_html
-        + '<div class="sec" style="margin-top:16px">🐋 Whale Transactions</div>'
-        + f'<div style="background:#111;border:1px solid #1a1a1a;border-radius:10px;overflow:hidden;margin-bottom:12px">'
-        + '<div style="padding:8px 12px;font-size:11px;color:#333;border-bottom:1px solid #141414">'
-        + '🟢 Leaving exchange = accumulation (bullish) · 🔴 Entering exchange = selling (bearish)'
-        + '</div>'
-        + whale_html + '</div>'
-        + '</div>'
+        f'<div><div class="sec">📰 Live News Feed — {coin_name}</div>' +
+        news_html +
+        '<div class="sec" style="margin-top:16px">🐋 Whale Transactions</div>' +
+        '<div style="background:#111;border:1px solid #1a1a1a;border-radius:10px;overflow:hidden;margin-bottom:12px">' +
+        '<div style="padding:8px 12px;font-size:11px;color:#333;border-bottom:1px solid #141414">' +
+        '🟢 Leaving exchange = accumulation (bullish) · 🔴 Entering exchange = selling (bearish)</div>' +
+        whale_html + '</div></div>' +
         # Right sidebar
-        + '<div>'
-        + '<div class="sec">📅 High Impact Events</div>'
-        + evt_html
-        + '<div class="sec" style="margin-top:14px">📊 Regime Factors</div>'
-        + f'<div style="background:#0a1a0a;border:1px solid #1a2e1a;border-radius:8px;padding:12px;margin-bottom:10px">'
-        + f'<div style="font-size:11px;color:#2ecc71;font-weight:bold;margin-bottom:6px">BULLISH FACTORS</div>'
-        + bull_html + '</div>'
-        + f'<div style="background:#1a0a0a;border:1px solid #2e1a1a;border-radius:8px;padding:12px;margin-bottom:10px">'
-        + f'<div style="font-size:11px;color:#e74c3c;font-weight:bold;margin-bottom:6px">BEARISH FACTORS</div>'
-        + bear_html + '</div>'
-        + '<div class="sec" style="margin-top:14px">📖 How to Read</div>'
-        + '<div style="background:#0d0d0d;border-radius:8px;padding:12px;font-size:11px;color:#444;line-height:2">'
-        + '<b style="color:#666">Score 72-100:</b> Strongly Bullish<br>'
-        + '<b style="color:#666">Score 57-71:</b> Bullish<br>'
-        + '<b style="color:#666">Score 44-56:</b> Neutral<br>'
-        + '<b style="color:#666">Score 29-43:</b> Bearish<br>'
-        + '<b style="color:#666">Score 0-28:</b> Strongly Bearish<br>'
-        + '<b style="color:#666">Funding +:</b> Longs crowded → flush risk<br>'
-        + '<b style="color:#666">Funding -:</b> Shorts crowded → squeeze risk<br>'
-        + '<b style="color:#666">OI Rising:</b> New money entering<br>'
-        + '<b style="color:#666">Whale from exchange:</b> Accumulation<br>'
-        + '<b style="color:#666">DXY rising:</b> Bad for crypto</div>'
-        + f'<div style="margin-top:10px;font-size:10px;color:#222;text-align:center;line-height:1.8">'
-        + 'Sources: Binance Futures · CoinGecko · Alternative.me<br>'
-        + 'CryptoPanic · Whale Alert · TradingEconomics · Stooq<br>'
-        + 'All free APIs · Auto-refreshes every 2 minutes</div>'
-        + '</div></div></body></html>'
+        '<div>' +
+        '<div class="sec">📅 High Impact Events</div>' +
+        evt_html +
+        '<div class="sec" style="margin-top:14px">📊 Regime Factors</div>' +
+        '<div style="background:#0a1a0a;border:1px solid #1a2e1a;border-radius:8px;padding:12px;margin-bottom:10px">' +
+        '<div style="font-size:11px;color:#2ecc71;font-weight:bold;margin-bottom:6px">BULLISH FACTORS</div>' +
+        bull_html + '</div>' +
+        '<div style="background:#1a0a0a;border:1px solid #2e1a1a;border-radius:8px;padding:12px;margin-bottom:10px">' +
+        '<div style="font-size:11px;color:#e74c3c;font-weight:bold;margin-bottom:6px">BEARISH FACTORS</div>' +
+        bear_html + '</div>' +
+        '<div class="sec" style="margin-top:14px">📖 How to Read</div>' +
+        '<div style="background:#0d0d0d;border-radius:8px;padding:12px;font-size:11px;color:#444;line-height:2">' +
+        '<b style="color:#666">Score 72-100:</b> Strongly Bullish<br>' +
+        '<b style="color:#666">Score 57-71:</b> Bullish<br>' +
+        '<b style="color:#666">Score 44-56:</b> Neutral — wait<br>' +
+        '<b style="color:#666">Score 29-43:</b> Bearish<br>' +
+        '<b style="color:#666">Score 0-28:</b> Strongly Bearish<br>' +
+        '<b style="color:#666">Funding +:</b> Longs crowded → flush risk<br>' +
+        '<b style="color:#666">Funding -:</b> Shorts crowded → squeeze<br>' +
+        '<b style="color:#666">OI Rising:</b> New money entering market<br>' +
+        '<b style="color:#666">Whale from exchange:</b> Accumulation<br>' +
+        '<b style="color:#666">DXY rising:</b> Bad for crypto</div>' +
+        f'<div style="margin-top:10px;font-size:10px;color:#222;text-align:center;line-height:1.8">' +
+        'Sources: Binance Futures · CoinGecko · Alternative.me<br>' +
+        'CryptoPanic · Whale Alert · TradingEconomics · Kraken<br>' +
+        'All free APIs · Auto-refreshes every 2 minutes</div>' +
+        '</div></div></body></html>'
     )
     return HTMLResponse(html)
 
