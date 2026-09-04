@@ -165,58 +165,65 @@ def get_timeout_hours(position: dict) -> float:
 def calc_position(balance: float, price: float, atr: float,
                   side: str, confidence: int) -> dict:
     """
-    Size is always derived from risk, never from desired profit.
-    1R = actual initial risk. Max $5.
-
-    Size = Risk / SL_distance
-    If ATR is large → smaller size (never more than $5 risk)
+    Professional position sizing.
+    Risk = fixed ($5 max), Size = Risk / ATR_stop_distance.
+    TP = 3.5x ATR allowing $15-30+ profits on good trades.
+    Higher confidence = full size. Lower = reduced size.
     """
-    # Confidence-based scaling within the $5 cap
-    if confidence >= 85:
-        mult = 1.0
-    elif confidence >= 75:
-        mult = 0.8
-    else:
-        mult = 0.6
+    from config import TP_ATR_MULTIPLIER
 
-    # Risk amount: $5 cap OR 1% of balance, whichever is smaller
+    # Confidence-based risk scaling
+    if confidence >= 85:
+        mult  = 1.0
+        label_prefix = "Full"
+    elif confidence >= 78:
+        mult  = 0.8
+        label_prefix = "0.8R"
+    elif confidence >= 70:
+        mult  = 0.6
+        label_prefix = "0.6R"
+    else:
+        mult  = 0.4
+        label_prefix = "0.4R"
+
+    # Risk: min of $5 cap and 1% of balance
     pct_risk = round(balance * RISK_PER_TRADE_PCT / 100, 2)
     risk_1r  = round(min(MAX_RISK_USD, pct_risk) * mult, 2)
-    risk_1r  = max(risk_1r, 0.50)  # minimum $0.50
+    risk_1r  = max(risk_1r, 0.30)
 
-    # SL distance in price
+    # SL distance based on real ATR
     sl_dist = atr * SL_ATR_MULTIPLIER
-    if sl_dist < price * 0.001:
-        sl_dist = price * 0.001
+    min_dist = price * 0.001
+    if sl_dist < min_dist:
+        sl_dist = min_dist
+
+    # TP at 3.5x ATR — allows $15-30+ on strong moves
+    tp_dist = atr * TP_ATR_MULTIPLIER
 
     if side == "BUY":
         sl = round(price - sl_dist, 2)
-        tp = round(price + sl_dist * (MIN_RISK_REWARD / 1.0) * 1.2, 2)  # TP at 1.8R+
+        tp = round(price + tp_dist, 2)
     else:
         sl = round(price + sl_dist, 2)
-        tp = round(price - sl_dist * (MIN_RISK_REWARD / 1.0) * 1.2, 2)
+        tp = round(price - tp_dist, 2)
 
-    tp_dist = abs(tp - price)
-    rr      = round(tp_dist / sl_dist, 2)
-    size    = round(risk_1r / sl_dist, 6)
+    rr   = round(tp_dist / sl_dist, 2)
+    size = round(risk_1r / sl_dist, 6)
 
-    # Labels for clarity
-    if mult == 1.0:
-        label = f"Full 1R (${risk_1r:.2f} risk, conf {confidence}%)"
-    elif mult == 0.8:
-        label = f"0.8R (${risk_1r:.2f} risk, conf {confidence}%)"
-    else:
-        label = f"0.6R (${risk_1r:.2f} risk, conf {confidence}%)"
+    # Expected profit at full TP
+    expected_profit = round(size * tp_dist, 2)
 
     return {
-        "risk_1r":    risk_1r,
-        "risk_usd":   risk_1r,
-        "size":       size,
-        "stop_loss":  sl,
-        "take_profit":tp,
-        "rr":         rr,
-        "sl_dist":    sl_dist,
-        "size_label": label,
+        "risk_1r":         risk_1r,
+        "risk_usd":        risk_1r,
+        "size":            size,
+        "stop_loss":       sl,
+        "take_profit":     tp,
+        "rr":              rr,
+        "sl_dist":         sl_dist,
+        "tp_dist":         tp_dist,
+        "expected_profit": expected_profit,
+        "size_label":      f"{label_prefix} (${risk_1r:.2f} risk | TP ~${expected_profit:.2f} | conf {confidence}%)",
     }
 
 
