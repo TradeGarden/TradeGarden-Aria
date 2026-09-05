@@ -255,8 +255,11 @@ def todays_loss_pct(balance: float) -> float:
 
 def check_rules(symbol: str, side: str, analysis: dict,
                 confidence: int, rr: float, balance: float) -> dict:
-    ms     = analysis.get("ms", {})
-    frames = analysis.get("frames", [])
+    ms      = analysis.get("ms",     {})
+    frames  = analysis.get("frames", [])
+    regime  = analysis.get("regime", {})
+    price   = analysis.get("price",  0)
+    atr     = analysis.get("atr14",  0)
 
     # Hard limits
     if get_open_positions_count() >= MAX_OPEN_POSITIONS:
@@ -275,10 +278,16 @@ def check_rules(symbol: str, side: str, analysis: dict,
         return {"approved": False,
                 "reason": f"{symbol} already open. One per symbol."}
 
+    # ── Block ranging markets ──────────────────────────────────────────────
+    if regime.get("regime") == "RANGING":
+        return {"approved": False,
+                "reason": "Market RANGING — no entries. Wait for clear trend."}
+
     # ── Priority 1: Market Structure ──────────────────────────────────────
     trend    = ms.get("trend","")
     strength = ms.get("strength_pct", 0)
-    bos      = ms.get("bos", False)
+    sw_low   = ms.get("swing_low",  0)
+    sw_high  = ms.get("swing_high", 0)
 
     if side == "BUY" and trend != "Bullish":
         return {"approved": False,
@@ -293,6 +302,21 @@ def check_rules(symbol: str, side: str, analysis: dict,
         return {"approved": False,
                 "reason": f"Trend strength only {strength}%. "
                           f"Need {MIN_TREND_STRENGTH}%+ for a valid entry."}
+
+    # ── Anti-chase rule ────────────────────────────────────────────────────
+    if atr > 0 and price > 0:
+        if side == "BUY" and sw_low > 0:
+            dist = (price - sw_low) / atr
+            if dist > 4.5:
+                return {"approved": False,
+                        "reason": f"Chasing — price {dist:.1f} ATR above swing low ${sw_low:,.2f}. "
+                                  f"Wait for pullback."}
+        if side == "SELL" and sw_high > 0:
+            dist = (sw_high - price) / atr
+            if dist > 4.5:
+                return {"approved": False,
+                        "reason": f"Chasing — price {dist:.1f} ATR below swing high ${sw_high:,.2f}. "
+                                  f"Wait for pullback."}
 
     # ── Priority 2: Multi-Timeframe Confirmation ──────────────────────────
     tf_agree = sum(1 for f in frames if f.get("decision") == side)
@@ -347,9 +371,25 @@ def open_trade(symbol: str, side: str, analysis: dict, decision: dict) -> dict:
         price      = analysis.get("price", 0)
         atr        = analysis.get("atr14", price * 0.02)
         confidence = decision.get("confidence", {}).get("total", 60)
-        calc       = calc_position(balance, price, atr, side, confidence)
-        rr         = calc["rr"]
+        calc = calc_position(balance, price, atr, side, confidence)
 
+        # Override with structure-based SL from decision engine
+        dec_levels = decision.get("levels", {})
+        if dec_levels.get("stop_loss", 0) > 0:
+            calc["stop_loss"]   = dec_levels["stop_loss"]
+            calc["take_profit"] = dec_levels["take_profit"]
+            sl_d = abs(price - calc["stop_loss"])
+            tp_d = abs(calc["take_profit"] - price)
+            if sl_d > 0:
+                calc["rr"]      = round(tp_d / sl_d, 2)
+                calc["risk_1r"] = round(calc["size"] * sl_d, 2)
+                expected        = round(calc["size"] * tp_d, 2)
+                calc["size_label"] = (
+                    calc["size_label"].split("(")[0].strip() +
+                    f" (${calc['risk_1r']:.2f} risk | TP ~${expected:.2f} | conf {confidence}%)"
+                )
+
+        rr = calc["rr"]
         check = check_rules(symbol, side, analysis, confidence, rr, balance)
         if not check["approved"]:
             return {"success": False, "reason": check["reason"]}
