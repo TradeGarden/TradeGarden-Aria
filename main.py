@@ -280,25 +280,38 @@ def _fvg_html(fvgs):
     return out
 
 def _liq_html(liq):
+    bsl = liq.get("bsl", 0)
+    ssl = liq.get("ssl", 0)
+    eq_highs = liq.get("equal_highs", [])
+    eq_lows  = liq.get("equal_lows",  [])
+    swept_bsl = liq.get("swept_bsl", False)
+    swept_ssl = liq.get("swept_ssl", False)
+
     out = (f"<div style='padding:5px 0;font-size:13px'>"
            f"<span style='color:#2ecc71'>BSL</span>"
-           f"<span style='color:#444;font-size:12px;margin-left:8px'>${liq['buy_side_level']:,.2f}</span></div>"
+           f"<span style='color:#444;font-size:12px;margin-left:8px'>${bsl:,.2f}</span>"
+           + (" <span style='color:#e74c3c;font-size:10px'>SWEPT</span>" if swept_bsl else "") +
+           f"</div>"
            f"<div style='padding:5px 0;font-size:13px;border-bottom:1px solid #141414'>"
            f"<span style='color:#e74c3c'>SSL</span>"
-           f"<span style='color:#444;font-size:12px;margin-left:8px'>${liq['sell_side_level']:,.2f}</span></div>")
-    if liq["equal_highs"]:
-        out += (f"<div style='padding:5px 0;color:#f39c12;font-size:12px'>"
-                f"Equal Highs @ ${liq['equal_highs_level']:,.2f} - BSL above</div>")
-    if liq["equal_lows"]:
-        out += (f"<div style='padding:5px 0;color:#f39c12;font-size:12px'>"
-                f"Equal Lows @ ${liq['equal_lows_level']:,.2f} - SSL below</div>")
-    if liq["sweep"]:
-        sw = liq["sweep"]
-        out += (f"<div style='padding:8px;margin-top:6px;background:#1a1200;"
-                f"border-radius:6px;border:1px solid #f39c12;font-size:12px'>"
-                f"<b style='color:#f39c12'>⚠️ Sweep</b> - {sw['direction']} · {sw['signal']}</div>")
-    return out
+           f"<span style='color:#444;font-size:12px;margin-left:8px'>${ssl:,.2f}</span>"
+           + (" <span style='color:#2ecc71;font-size:10px'>SWEPT ✓</span>" if swept_ssl else "") +
+           f"</div>")
 
+    for h in eq_highs[:2]:
+        out += (f"<div style='color:#f39c12;font-size:12px;padding:3px 0'>"
+                f"Equal Highs @ ${h:,.2f} - BSL above</div>")
+    for l in eq_lows[:2]:
+        out += (f"<div style='color:#f39c12;font-size:12px;padding:3px 0'>"
+                f"Equal Lows @ ${l:,.2f} - SSL below</div>")
+
+    if swept_ssl:
+        out += ("<div style='color:#2ecc71;font-size:11px;padding:4px 0'>"
+                "SSL swept — stop hunt complete, potential bullish reversal</div>")
+    if swept_bsl:
+        out += ("<div style='color:#e74c3c;font-size:11px;padding:4px 0'>"
+                "BSL swept — stop hunt complete, potential bearish reversal</div>")
+    return out
 def _levels_html(levels):
     def bar(s):
         w = {"High":100,"Moderate":60,"Low":30}.get(s,40)
