@@ -59,10 +59,21 @@ from config          import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    setup_database()       # ← create tables if first run
-    start_auto_trading()   # ← Aria starts trading itself here
+    try:
+        setup_database()
+        print("[Aria] Database ready")
+    except Exception as e:
+        print(f"[Aria] DB setup error: {e} — continuing without DB")
+    try:
+        start_auto_trading()
+        print("[Aria] Auto-trading started")
+    except Exception as e:
+        print(f"[Aria] Trading start error: {e}")
     yield
-    stop_auto_trading()
+    try:
+        stop_auto_trading()
+    except Exception:
+        pass
 
 
 app = FastAPI(title="Aria AI Trading Engine", lifespan=lifespan)
