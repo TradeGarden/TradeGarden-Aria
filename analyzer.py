@@ -518,15 +518,31 @@ def calc_sr_zones(candles: list, price: float, atr: float) -> dict:
     dist_sup    = round((price - nearest_sup) / atr, 2) if nearest_sup and atr else 0
     dist_res    = round((nearest_res - price) / atr, 2) if nearest_res and atr else 0
 
+    # Best support/resistance with touch count and strength
+    best_sup = sup[0] if sup else {"level": 0, "touches": 0}
+    best_res = res[0] if res else {"level": 0, "touches": 0}
+
+    # Strength based on touches (more touches = stronger level)
+    sup_strength = ("Strong" if best_sup["touches"] >= 4
+                    else "Moderate" if best_sup["touches"] >= 2
+                    else "Weak")
+    res_strength = ("Strong" if best_res["touches"] >= 4
+                    else "Moderate" if best_res["touches"] >= 2
+                    else "Weak")
+
     return {
-        "support":              [round(z["level"],2) for z in sup[:3]],
-        "resistance":           [round(z["level"],2) for z in res[:3]],
-        "nearest_support":      round(nearest_sup, 2),
-        "nearest_resistance":   round(nearest_res, 2),
-        "dist_to_support_atr":  dist_sup,   # in ATR units
+        "support":               [round(z["level"],2) for z in sup[:3]],
+        "resistance":            [round(z["level"],2) for z in res[:3]],
+        "nearest_support":       round(nearest_sup, 2),
+        "nearest_resistance":    round(nearest_res, 2),
+        "support_touches":       best_sup["touches"],
+        "resistance_touches":    best_res["touches"],
+        "support_strength":      sup_strength,
+        "resistance_strength":   res_strength,
+        "dist_to_support_atr":   dist_sup,
         "dist_to_resistance_atr":dist_res,
-        "near_resistance":      0 < dist_res < 1.5,  # within 1.5 ATR of resistance
-        "near_support":         0 < dist_sup < 1.5,
+        "near_resistance":       0 < dist_res < 1.5,
+        "near_support":          0 < dist_sup < 1.5,
     }
 
 
