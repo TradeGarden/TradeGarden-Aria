@@ -314,29 +314,43 @@ def _liq_html(liq):
     return out
 def _levels_html(levels):
     def bar(s):
-        w = {"High":100,"Moderate":60,"Low":30}.get(s,40)
-        c = {"High":"#2ecc71","Moderate":"#f39c12","Low":"#e74c3c"}.get(s,"#555")
+        w = {"Strong":100,"Moderate":60,"Weak":30}.get(s,40)
+        c = {"Strong":"#2ecc71","Moderate":"#f39c12","Weak":"#e74c3c"}.get(s,"#555")
         return (f"<div class='lv-bar-bg'>"
                 f"<div style='width:{w}%;height:100%;background:{c};border-radius:3px'></div></div>")
     out = ""
+    # support/resistance are now lists - get nearest (first item)
+    sup_list = levels.get("support", [])
+    res_list = levels.get("resistance", [])
+    sup_price = sup_list[0] if isinstance(sup_list, list) and sup_list else levels.get("nearest_support", 0)
+    res_price = res_list[0] if isinstance(res_list, list) and res_list else levels.get("nearest_resistance", 0)
+
     for lbl, lvl, touches, strength, color in [
-        ("Support",    levels["support"],    levels["support_touches"],    levels["support_strength"],    "#2ecc71"),
-        ("Resistance", levels["resistance"], levels["resistance_touches"], levels["resistance_strength"], "#e74c3c"),
+        ("Support",    sup_price, levels.get("support_touches",    1), levels.get("support_strength",    "Weak"), "#2ecc71"),
+        ("Resistance", res_price, levels.get("resistance_touches", 1), levels.get("resistance_strength", "Weak"), "#e74c3c"),
     ]:
+        price_str = f"${float(lvl):,.2f}" if lvl else "—"
         out += (f"<div style='padding:7px 0;border-bottom:1px solid #141414'>"
                 f"<div style='display:flex;justify-content:space-between'>"
                 f"<span style='color:{color};font-size:13px;font-weight:bold'>{lbl}</span>"
-                f"<span style='color:#fff;font-size:13px'>${lvl:,.2f}</span></div>"
+                f"<span style='color:#fff;font-size:13px'>{price_str}</span></div>"
                 f"<div style='color:#333;font-size:11px;margin-top:2px'>"
                 f"Tested {touches}× · {strength}</div>"
                 f"{bar(strength)}</div>")
     return out
 
 def _conf_breakdown(conf):
-    maxes = {"Market Structure":25,"EMA Alignment":25,"RSI":15,
-             "Candlestick":20,"Volume":15}
+    maxes = {
+        "Market Structure": 25, "EMA Alignment": 25,
+        "EMA": 15, "RSI": 15,
+        "Candle Strength": 20, "Candlestick": 20,
+        "Volume": 15, "Location": 35, "Timeframes": 5,
+    }
+    breakdown = conf.get("breakdown", {}) if isinstance(conf, dict) else {}
+    if not breakdown:
+        return "<div style='color:#444;padding:8px;font-size:12px'>No breakdown</div>"
     out = ""
-    for k, v in conf["breakdown"].items():
+    for k, v in breakdown.items():
         mx  = maxes.get(k, 20)
         pct = int(v / mx * 100) if mx > 0 else 0
         bc  = "#2ecc71" if pct>=70 else ("#f39c12" if pct>=40 else "#222")
