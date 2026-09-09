@@ -221,11 +221,12 @@ def compute_confidence(analysis: dict, decision: str) -> dict:
 def determine_signal(analysis: dict) -> str:
     """
     Two conditions required for any signal:
-    1. Market structure bias (Bullish/Bearish)
+    1. Market structure bias (Bullish/Bearish) — CLEAN structure
     2. Valid entry location (not chasing extended moves)
 
     Bullish structure alone = WAIT (not BUY).
     Need pullback to valid zone before considering entry.
+    Last swing MUST confirm trend — if last swing breaks structure, WAIT.
     """
     ms      = analysis.get("ms",    {})
     e20     = analysis.get("ema20", 0)
@@ -243,10 +244,35 @@ def determine_signal(analysis: dict) -> str:
     bos      = ms.get("bos",     False)
     sw_low   = ms.get("swing_low",  0)
     sw_high  = ms.get("swing_high", 0)
+    sequence = ms.get("sequence", "")
+    choch    = ms.get("choch", False)
 
     # Market must be trending (not ranging)
     if regime.get("regime") == "RANGING":
-        return "WAIT"  # No trend-following entries in ranging market
+        return "WAIT"
+
+    # CHoCH = structure reversing = WAIT
+    if choch:
+        return "WAIT"
+
+    # Sequence validation — last two swings must confirm trend
+    # "HH→HL→HH→LL" ends with LL = structure breaking down even if called "Bullish"
+    # "LH→LL→LH→HH" ends with HH = structure recovering even if called "Bearish"
+    if sequence:
+        parts = [p.strip() for p in sequence.split("→")]
+        if len(parts) >= 2:
+            last  = parts[-1]
+            second_last = parts[-2]
+            # For bullish: last two must include HL or HH
+            if trend == "Bullish" and last == "LL":
+                return "WAIT"  # Last swing breaks bullish structure
+            if trend == "Bullish" and last == "LH" and second_last in ("LH","LL"):
+                return "WAIT"  # Two consecutive bearish swings in "bullish" structure
+            # For bearish: last two must include LH or LL
+            if trend == "Bearish" and last == "HH":
+                return "WAIT"  # Last swing breaks bearish structure
+            if trend == "Bearish" and last == "HL" and second_last in ("HL","HH"):
+                return "WAIT"  # Two consecutive bullish swings in "bearish" structure
 
     # ── Bullish bias check ────────────────────────────────────
     bullish_bias = (trend == "Bullish" and
