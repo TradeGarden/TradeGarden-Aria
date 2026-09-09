@@ -1427,16 +1427,29 @@ async def intelligence_page(symbol: str = "BTCUSD"):
         f'<div class="ms" style="color:{sc(coin.get("change_24h",0))}">{chg_disp}</div>' +
         f'<div style="font-size:10px;color:#333">H {na_str(coin.get("high_24h",0),"${:,.0f}")} L {na_str(coin.get("low_24h",0),"${:,.0f}")}</div></div>' +
         '</div>' +
-        # TradingView live chart
-        f'<div style="margin:0 14px 14px;background:#111;border:1px solid #1a1a1a;border-radius:10px;overflow:hidden">' +
+        # DXY + Coin charts side by side
+        '<div style="margin:0 14px 14px;display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
+        # DXY chart
+        '<div style="background:#111;border:1px solid #1a1a1a;border-radius:10px;overflow:hidden">' +
+        '<div style="padding:10px 14px;font-size:10px;color:#444;text-transform:uppercase;letter-spacing:2px">DXY — US Dollar Index</div>' +
+        '<div class="tradingview-widget-container" style="height:250px">' +
+        '<div id="dxy_chart"></div>' +
+        '<script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>' +
+        '{"width":"100%","height":250,"symbol":"TVC:DXY","interval":"60","timezone":"Etc/UTC",' +
+        '"theme":"dark","style":"1","locale":"en","enable_publishing":false,' +
+        '"allow_symbol_change":false,"container_id":"dxy_chart"}' +
+        '</script></div></div>' +
+        # Coin chart
+        f'<div style="background:#111;border:1px solid #1a1a1a;border-radius:10px;overflow:hidden">' +
         f'<div style="padding:10px 14px;font-size:10px;color:#444;text-transform:uppercase;letter-spacing:2px">Live Chart — {coin_name}</div>' +
-        f'<div class="tradingview-widget-container" style="height:300px">' +
+        f'<div class="tradingview-widget-container" style="height:250px">' +
         f'<div id="tv_chart"></div>' +
         f'<script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>' +
-        f'{{"width":"100%","height":300,"symbol":"{tv_sym}","interval":"60","timezone":"Etc/UTC",' +
+        f'{{"width":"100%","height":250,"symbol":"{tv_sym}","interval":"60","timezone":"Etc/UTC",' +
         f'"theme":"dark","style":"1","locale":"en","enable_publishing":false,' +
         f'"allow_symbol_change":false,"container_id":"tv_chart"}}' +
         '</script></div></div>' +
+        '</div>' +
         # Main grid
         '<div class="ig">' +
         # Left: News + Whales
