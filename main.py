@@ -1435,7 +1435,7 @@ async def intelligence_page(symbol: str = "BTCUSD"):
         '<div class="tradingview-widget-container" style="height:250px">' +
         '<div id="dxy_chart"></div>' +
         '<script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>' +
-        '{"width":"100%","height":250,"symbol":"TVC:DXY","interval":"60","timezone":"Etc/UTC",' +
+        '{"width":"100%","height":250,"symbol":"CAPITALCOM:DXY","interval":"60","timezone":"Etc/UTC",' +
         '"theme":"dark","style":"1","locale":"en","enable_publishing":false,' +
         '"allow_symbol_change":false,"container_id":"dxy_chart"}' +
         '</script></div></div>' +
