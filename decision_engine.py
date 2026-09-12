@@ -321,10 +321,10 @@ def determine_signal(analysis: dict) -> str:
         if extended or into_resistance:
             return "WAIT"  # Anti-chase or buying into resistance
 
-        if in_bull_fvg or at_support or swept_ssl:
+        very_close_sup = 0 < dist_sup < 1.2
+        if in_bull_fvg or swept_ssl or very_close_sup:
             return "BUY"
-
-        return "WAIT"  # Bullish but no valid location
+        return "WAIT"  # Bullish but no strong retest location
 
     if bearish_bias:
         in_bear_fvg = any(
@@ -345,9 +345,9 @@ def determine_signal(analysis: dict) -> str:
         if extended or into_support:
             return "WAIT"
 
-        if in_bear_fvg or at_resistance or swept_bsl:
+        very_close_res = 0 < dist_res < 1.2
+        if in_bear_fvg or swept_bsl or very_close_res:
             return "SELL"
-
         return "WAIT"
 
     return "WAIT"
@@ -586,9 +586,12 @@ def decide(analysis: dict) -> dict:
     confidence = compute_confidence(analysis, decision)
     conf_total = confidence["total"]
 
-    # Final gate: minimum confidence
+    # Final gate: confidence + location
     from config import MIN_CONFIDENCE
     if conf_total < MIN_CONFIDENCE and decision != "WAIT":
+        decision = "WAIT"
+    loc = confidence.get("breakdown",{}).get("Location",0)
+    if loc < 10 and decision != "WAIT":
         decision = "WAIT"
 
     levels = calc_trade_levels(
