@@ -1399,9 +1399,9 @@ async def intelligence_page(symbol: str = "BTCUSD"):
         f'<div class="ms">${markets["total_mcap"]:.2f}T</div></div>' +
         # DXY - TradingView mini chart
         f'<div class="mc"><div class="ml">DXY Dollar Index</div>' +
-        f'<div class="mv" style="color:{sc(-markets.get("dxy_change",0))}">{dxy_display}</div>' +
-        f'<div class="ms">{dxy_chg_disp}</div>' +
-        f'<div style="font-size:10px;color:#333">DXY↓ = crypto up</div></div>' +
+        (f'<div class="mv" style="color:{sc(-markets.get("dxy_change",0))}">{dxy_display}</div>' +
+        f'<div class="ms" style="color:{sc(-markets.get("dxy_change",0))}">{dxy_chg_disp} today</div>' if markets.get('dxy_available') else '<div class="mv" style="color:#555">See chart ↓</div>' + '<div class="ms">Stooq feed loading</div>') +
+        f'<div style="font-size:10px;color:#333">DXY↓ = crypto up | DXY↑ = crypto risk off</div></div>' +
         # Funding
         f'<div class="mc"><div class="ml">Funding Rate</div>' +
         f'<div class="mv" style="color:{sig_c(funding["signal"])}">{fund_rate}</div>' +
@@ -1427,8 +1427,8 @@ async def intelligence_page(symbol: str = "BTCUSD"):
         f'<div class="ms" style="color:{sc(coin.get("change_24h",0))}">{chg_disp}</div>' +
         f'<div style="font-size:10px;color:#333">H {na_str(coin.get("high_24h",0),"${:,.0f}")} L {na_str(coin.get("low_24h",0),"${:,.0f}")}</div></div>' +
         '</div>' +
-        # DXY + Coin charts side by side
-        '<div style="margin:0 14px 14px;display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
+        # DXY on top, coin chart below
+        '<div style="margin:0 14px 14px;display:grid;grid-template-columns:1fr;gap:10px">' +
         # DXY chart
         '<div style="background:#111;border:1px solid #1a1a1a;border-radius:10px;overflow:hidden">' +
         '<div style="padding:10px 14px;font-size:10px;color:#444;text-transform:uppercase;letter-spacing:2px">DXY — US Dollar Index</div>' +
