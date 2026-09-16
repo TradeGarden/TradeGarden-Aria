@@ -59,10 +59,17 @@ def generate() -> list:
     wins   = [t for t in trades if float(t.get("pl",0)) > 0]
     losses = [t for t in trades if float(t.get("pl",0)) < 0]
     be_trades = [t for t in trades if abs(float(t.get("pl",0))) < 0.15]
-    tp_trades = [t for t in trades
-                 if "Take Profit" in t.get("exit_reason","")
-                 or "Partial" in t.get("exit_reason","")]
-    sl_trades = [t for t in trades if "Stop Loss" in t.get("exit_reason","")]
+    # Correct classification based on actual P/L
+    tp_trades    = [t for t in trades if "Take Profit" in t.get("exit_reason","")]
+    partial_t    = [t for t in trades if "Partial TP" in t.get("exit_reason","")]
+    be_trades    = [t for t in trades if "Break-Even" in t.get("exit_reason","")
+                    or abs(float(t.get("pl",0))) <= 0.50]
+    profit_lock  = [t for t in trades if "Profit-lock" in t.get("exit_reason","")]
+    sl_trades    = [t for t in trades if "Actual Loss" in t.get("exit_reason","")
+                    or (float(t.get("pl",0)) < -0.05 and
+                        "Break-Even" not in t.get("exit_reason","")
+                        and "Profit-lock" not in t.get("exit_reason","")
+                        and "Take Profit" not in t.get("exit_reason",""))]
     manual_t  = [t for t in trades if "Manual" in t.get("exit_reason","")]
     timeout_t = [t for t in trades if "Timeout" in t.get("exit_reason","")
                  or "timeout" in t.get("exit_reason","").lower()]
@@ -168,21 +175,30 @@ def generate() -> list:
     target_rate = round(tp_count/max(total,1)*100,1)
     be_rate     = round(be_count/max(total,1)*100,1)
 
+    tp_count     = len(tp_trades)
+    be_count     = len(be_trades)
+    pl_count     = len(profit_lock)
+    sl_count     = len(sl_trades)
+    target_rate  = round(tp_count/max(total,1)*100,1)
+    be_rate      = round(be_count/max(total,1)*100,1)
+    pl_rate      = round(pl_count/max(total,1)*100,1)
+    real_sl_rate = round(sl_count/max(total,1)*100,1)
+
     exit_detail = (
-        f"EXIT BREAKDOWN — this is what's ACTUALLY happening:\n\n"
-        f"  Take Profit hit:    {tp_count}/{total} trades ({target_rate}%)\n"
-        f"  Break-Even exit:    {be_count}/{total} trades ({be_rate}%)\n"
-        f"  Stop Loss hit:      {sl_count}/{total} trades ({round(sl_count/max(total,1)*100,1)}%)\n"
-        f"  Manual close:       {len(manual_t)}/{total} trades\n"
-        f"  Timeout:            {len(timeout_t)}/{total} trades\n"
-        f"  Structure invalid:  {len(struct_t)}/{total} trades\n\n"
-        f"  WIN RATE: {win_rate}% ({win_count} wins)\n"
-        f"  TARGET HIT RATE: {target_rate}% ({tp_count} targets)\n\n"
-        + ("⚠️ WIN ≠ TARGET HIT. Most wins came from break-even, not the planned target. "
-           "The entries are producing positive movement but trades are not reaching their intended targets. "
-           "This means exit management may need review, NOT entry rules."
-           if be_count > tp_count else
-           "✅ Trades are reaching their intended targets.")
+        f"EXIT BREAKDOWN — corrected classification:\n\n"
+        f"  ✅ Take Profit hit:     {tp_count}/{total} ({target_rate}%)\n"
+        f"  🔒 Profit-lock exit:   {pl_count}/{total} ({pl_rate}%) — winners stopped out profitably\n"
+        f"  ⚡ Break-Even exit:    {be_count}/{total} ({be_rate}%) — $0 after BE triggered\n"
+        f"  ❌ Actual losses (SL): {sl_count}/{total} ({real_sl_rate}%) — real money lost\n"
+        f"  ⏱ Timeout:            {len(timeout_t)}/{total}\n"
+        f"  🔄 Structure exit:     {len(struct_t)}/{total}\n\n"
+        f"  WIN RATE: {win_rate}% | TARGET HIT: {target_rate}%\n\n"
+        + (f"⚠️ Only {target_rate}% of trades reach the intended target. "
+           f"Most profitable exits are profit-lock ({pl_rate}%) not full TP. "
+           f"The BE system was using fixed $2 regardless of risk — now fixed to R-based. "
+           f"Real losses: {real_sl_rate}% of trades."
+           if tp_count < total * 0.3 else
+           f"✅ {target_rate}% target rate — exit management working well.")
     )
 
     be_priority = "HIGH" if be_count > total*0.5 and tp_count == 0 else "MEDIUM" if be_count > tp_count else "INFO"
