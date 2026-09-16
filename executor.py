@@ -461,6 +461,27 @@ def open_trade(symbol: str, side: str, analysis: dict, decision: dict) -> dict:
 
 # ── Close trade ───────────────────────────────────────────────────────────
 
+def _classify_exit(reason: str, pl: float, partial: float) -> str:
+    """Classify exit by actual outcome, not exit mechanism.
+    Fixes misleading '27/37 Stop Loss' — many were profitable exits."""
+    if partial < 1.0:
+        return f"Partial TP (${pl:+.2f})"
+    r = reason.lower()
+    if pl < -0.05:
+        return "Actual Loss (SL hit)"
+    elif abs(pl) <= 0.50:
+        return "Break-Even exit"
+    elif "take profit" in r:
+        return f"Take Profit (${pl:+.2f})"
+    elif "timeout" in r:
+        return f"Timeout (${pl:+.2f})"
+    elif "structure" in r:
+        return f"Structure exit (${pl:+.2f})"
+    elif pl > 0.50:
+        return f"Profit-lock exit (${pl:+.2f})"
+    return reason
+
+
 def close_trade(position: dict, price: float,
                 reason: str = "Manual", partial: float = 1.0) -> dict:
     try:
@@ -508,7 +529,7 @@ def close_trade(position: dict, price: float,
             "pl":          pl,
             "new_balance": new_balance,
             "duration":    duration,
-            "exit_reason": reason + (" (partial 50%)" if partial < 1.0 else ""),
+            "exit_reason": _classify_exit(reason, pl, partial),
             "mode":        "STRUCTURED",
             "opened_at":   str(position.get("opened_at","")),
         })
@@ -527,7 +548,7 @@ def close_trade(position: dict, price: float,
             "r_multiple":  r_mult,
             "new_balance": new_balance,
             "duration":    duration,
-            "exit_reason": reason,
+            "exit_reason": _classify_exit(reason, pl, partial),
             "closed_at":   datetime.utcnow().isoformat(),
         })
 
@@ -622,9 +643,28 @@ def manage_position(position: dict, price: float,
         except Exception:
             pass
 
-        # ── Milestone 1: Break-even at +$2 profit ───────────────────────
-        # Using USD directly - more reliable than R calculation
-        if not position.get("be_moved") and fl >= 2.0:
+        # ══════════════════════════════════════════════════════════════
+        # R-BASED MILESTONE SYSTEM (fixed from document analysis)
+        #
+        # Old system: fixed $2 BE regardless of risk
+        #   $5-risk trade: BE at 0.4R (way too early)
+        #   $0.60-risk trade: BE at 3.37R (way too late)
+        #
+        # New system: R-based — same proportion every trade
+        #   +1.25R → Break-even
+        #   +2.0R  → Lock 1R profit
+        #   +3.0R  → Partial TP 50%
+        #   +3.0R+ → Trail remainder by ATR
+        # ══════════════════════════════════════════════════════════════
+
+        risk_1r = float(position.get("risk_1r") or
+                        position.get("risk_amount") or 2.0)
+        if risk_1r <= 0:
+            risk_1r = 2.0
+
+        # ── Milestone 1: Break-even at +1.25R ────────────────────────────
+        be_threshold = risk_1r * 1.25
+        if not position.get("be_moved") and fl >= be_threshold:
             new_sl = round(entry + 0.01, 2) if side == "BUY" \
                      else round(entry - 0.01, 2)
             if (side == "BUY" and new_sl > sl) or \
@@ -632,6 +672,7 @@ def manage_position(position: dict, price: float,
                 position["stop_loss"] = new_sl
                 position["be_moved"]  = True
                 save_position(position)
+                r_now = round(fl / risk_1r, 2)
                 append_trade({
                     "action":    "SL_MOVED_BE",
                     "trade_id":  position.get("trade_id",""),
@@ -639,21 +680,22 @@ def manage_position(position: dict, price: float,
                     "new_sl":    new_sl,
                     "old_sl":    sl,
                     "profit_at": round(fl, 2),
-                    "r_at_move": round(r_earned, 2),
+                    "r_at_move": r_now,
                     "timestamp": datetime.utcnow().isoformat(),
                 })
-                _log(f"BREAK-EVEN @ ${new_sl:,.2f} "
-                     f"profit ${fl:.2f} — trade now RISK FREE "
-                     f"#{position.get('trade_id','')}")
+                _log(f"BE @ ${new_sl:,.2f} | +{r_now}R (${fl:.2f}) "
+                     f"— RISK FREE #{position.get('trade_id','')}")
 
-        # ── Milestone 2: Lock $2.50 profit at +$3 ────────────────────────
+        # ── Milestone 2: Lock 1R profit at +2R ───────────────────────────
+        lock_threshold = risk_1r * 2.0
         if position.get("be_moved") and \
-           not position.get("profit_locked") and fl >= 3.0:
-            # Move SL to lock in $2.50 minimum profit
-            lock_size  = size if size > 0 else 0.001
-            lock_move  = 2.50 / lock_size if lock_size > 0 else 0
-            lock_price = (round(entry + lock_move, 2) if side == "BUY"
-                         else round(entry - lock_move, 2))
+           not position.get("profit_locked") and fl >= lock_threshold:
+            sl_dist    = position.get("sl_dist", 0)
+            if sl_dist <= 0 and size > 0:
+                sl_dist = risk_1r / size
+            lock_price = (round(entry + sl_dist, 2) if side == "BUY"
+                         else round(entry - sl_dist, 2))
+            locked_usd = round(abs(lock_price - entry) * size, 2)
             current_sl = position["stop_loss"]
             if (side == "BUY"  and lock_price > current_sl) or \
                (side == "SELL" and lock_price < current_sl):
@@ -666,22 +708,26 @@ def manage_position(position: dict, price: float,
                     "symbol":     position["symbol"],
                     "new_sl":     lock_price,
                     "old_sl":     current_sl,
-                    "locked_usd": 2.50,
+                    "locked_usd": locked_usd,
                     "profit_at":  round(fl, 2),
+                    "r_at_move":  round(fl / risk_1r, 2),
                     "timestamp":  datetime.utcnow().isoformat(),
                 })
-                _log(f"$2.50 LOCKED — SL -> ${lock_price:,.2f} "
-                     f"(profit ${fl:.2f}) "
+                _log(f"1R LOCKED — SL->${lock_price:,.2f} "
+                     f"(~${locked_usd:.2f} locked) "
                      f"#{position.get('trade_id','')}")
 
-        # ── Milestone 3 + 4: Partial TP at +$6, Trail after ─────────────
-        if not position.get("partial_closed") and fl >= 6.0:
+        # ── Milestone 3: Partial TP at +3R ───────────────────────────────
+        partial_threshold = risk_1r * 3.0
+        if not position.get("partial_closed") and fl >= partial_threshold:
+            r_now = round(fl / risk_1r, 1)
             close_trade(position, price,
-                        f"Partial TP at +${fl:.2f}", partial=0.5)
-            _log(f"PARTIAL TP 50% @ ${price:,.2f} (+${fl:.2f})")
+                        f"Partial TP +{r_now}R (${fl:.2f})", partial=0.5)
+            _log(f"PARTIAL TP 50% @ ${price:,.2f} (+{r_now}R / +${fl:.2f})")
 
-        # Trail the remaining position after partial TP
-        if position.get("partial_closed") and fl >= 8.0 and atr > 0:
+        # ── Milestone 4: Trail after +3R partial ─────────────────────────
+        if position.get("partial_closed") and \
+           fl >= risk_1r * 3.0 and atr > 0:
             trail_dist = atr * TRAIL_ATR_MULT
             if side == "BUY":
                 new_sl = round(price - trail_dist, 2)
@@ -689,8 +735,7 @@ def manage_position(position: dict, price: float,
                     position["stop_loss"] = new_sl
                     position["trail_sl"]  = True
                     save_position(position)
-                    _log(f"TRAIL SL up to ${new_sl:,.2f} "
-                         f"(ATR×{TRAIL_ATR_MULT}) "
+                    _log(f"TRAIL SL->${new_sl:,.2f} "
                          f"#{position.get('trade_id','')}")
             else:
                 new_sl = round(price + trail_dist, 2)
@@ -698,9 +743,8 @@ def manage_position(position: dict, price: float,
                     position["stop_loss"] = new_sl
                     position["trail_sl"]  = True
                     save_position(position)
-                    _log(f"TRAIL SL down to ${new_sl:,.2f} "
+                    _log(f"TRAIL SL->${new_sl:,.2f} "
                          f"#{position.get('trade_id','')}")
-
         return False
 
     except Exception as e:
