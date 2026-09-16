@@ -26,8 +26,8 @@ DAILY_LOSS_LIMIT_PCT = 5.0    # Stop if down 5% today
 
 # ── Entry Quality ──────────────────────────────────────────────
 MIN_RISK_REWARD        = 1.8   # Minimum 1.8:1 R:R
-SL_ATR_MULTIPLIER      = 1.5   # Stop = 1.5x ATR below/above entry
-TP_ATR_MULTIPLIER      = 3.5   # Initial TP = 3.5x ATR (allows bigger moves)
+SL_ATR_MULTIPLIER      = 2.0   # Stop = 2.0x ATR - gives trades room to breathe
+TP_ATR_MULTIPLIER      = 4.5   # Initial TP = 4.5x ATR - R:R stays 2.25:1 with wider SL
 MIN_CONFIDENCE         = 70    # 70%+ confidence required
 MIN_TREND_STRENGTH     = 15    # 15%+ trend strength (real swing-based)
 MIN_TIMEFRAMES_ALIGNED = 2     # 2+ timeframes must agree
@@ -42,7 +42,7 @@ MAX_OPEN_POSITIONS   = 2      # BTC + ETH simultaneously
 # 1R = actual initial risk on that trade (max $5)
 # Targets are in R multiples — adapts to any position size
 
-MILESTONE_BREAKEVEN   = 1.0   # +1R → SL to entry (risk free)
+MILESTONE_BREAKEVEN   = 1.2   # +1.2R → SL to entry (give more room)
 MILESTONE_LOCK        = 1.2   # +1.2R → SL above entry, lock profit
 MILESTONE_LOCK_AMOUNT = 0.5   # Lock 50% of 1R as guaranteed profit
 MILESTONE_PARTIAL_TP  = 2.0   # +2R → close 50% of position
