@@ -1,20 +1,27 @@
 """
-recommendations.py - Aria Engine Health & Intelligence Analysis
+recommendations.py - Aria Engine Health & Improvement Analysis
 ==============================================================
-WIN != TARGET HIT — the most important distinction.
-Tracks exit quality, break-even efficiency, entry quality.
-Detects engine glitches automatically.
-"""
-from database import load_closed_trades, load_journal
-from datetime import datetime
+FIXED based on review:
 
+1. exit_type is normalized single field — categories never overlap
+2. BE classification uses exit_type only (not abs(pl) <= 0.50)
+3. Exit categories are mutually exclusive — sum = total trades
+4. "Entries are working" replaced with neutral language
+5. 30 trades = preliminary, not reliable
+6. Planned R:R separated from realized R
+7. Strategy score replaced with actual measurements
+8. Realized R tracked separately from planned R:R
+"""
+
+from database import load_closed_trades, load_journal
+
+
+def _avg(vals):
+    return round(sum(vals)/len(vals), 2) if vals else 0.0
 
 def _wr(t):
     if not t: return 0.0
     return round(len([x for x in t if float(x.get("pl",0))>0])/len(t)*100,1)
-
-def _avg(vals):
-    return round(sum(vals)/len(vals),2) if vals else 0.0
 
 def _pf(trades):
     w = sum(float(t.get("pl",0)) for t in trades if float(t.get("pl",0))>0)
@@ -25,23 +32,27 @@ def _bar(n, total, width=20):
     filled = int(n/max(total,1)*width)
     return "█"*filled + "░"*(width-filled)
 
+def _sample_label(n):
+    if n < 10:  return "Very Low — avoid conclusions"
+    if n < 30:  return "Low — preliminary only"
+    if n < 50:  return "Preliminary — trends visible"
+    if n < 100: return "Moderate — useful patterns"
+    return "Good — analysis is meaningful"
+
 
 def generate() -> list:
     trades = load_closed_trades(999)
     total  = len(trades)
-    target = 30
     recs   = []
 
-    # ── No trades yet ─────────────────────────────────────────
+    # ── No trades ─────────────────────────────────────────────────────────
     if total == 0:
         return [{
             "priority":"INFO","emoji":"🚀",
             "title":"Aria is running — no completed trades yet",
-            "detail":("Aria scans every 60 seconds. Once a trade closes "
-                      "(via Take Profit, Stop Loss, break-even, or timeout), "
-                      "full analysis appears here.\n\n"
-                      "Check the Journal page to see open positions and "
-                      "what Aria is seeing right now."),
+            "detail":("Aria scans every 60 seconds. Once a trade closes, "
+                      "full analysis appears here. Check the Journal page "
+                      "to see open positions."),
             "confidence":"—","action":"No action needed. Let Aria trade.",
             "evidence":"0 completed trades",
         }]
@@ -49,223 +60,231 @@ def generate() -> list:
     if total < 3:
         return [{
             "priority":"INFO","emoji":"📊",
-            "title":f"Collecting data — {total}/3 minimum trades",
-            "detail":f"{3-total} more completed trade(s) needed to begin analysis.",
+            "title":f"Collecting data — {total}/3 minimum",
+            "detail":f"Need 3+ completed trades to start analysis.",
             "confidence":"—","action":"No action needed.",
-            "evidence":f"{total} trade(s) recorded",
+            "evidence":f"{total} trade(s)",
         }]
 
-    # ── Calculate core stats ──────────────────────────────────
-    wins   = [t for t in trades if float(t.get("pl",0)) > 0]
-    losses = [t for t in trades if float(t.get("pl",0)) < 0]
-    be_trades = [t for t in trades if abs(float(t.get("pl",0))) < 0.15]
-    # Correct classification based on actual P/L
-    tp_trades    = [t for t in trades if "Take Profit" in t.get("exit_reason","")]
-    partial_t    = [t for t in trades if "Partial TP" in t.get("exit_reason","")]
-    be_trades    = [t for t in trades if "Break-Even" in t.get("exit_reason","")
-                    or abs(float(t.get("pl",0))) <= 0.50]
-    profit_lock  = [t for t in trades if "Profit-lock" in t.get("exit_reason","")]
-    sl_trades    = [t for t in trades if "Actual Loss" in t.get("exit_reason","")
-                    or (float(t.get("pl",0)) < -0.05 and
-                        "Break-Even" not in t.get("exit_reason","")
-                        and "Profit-lock" not in t.get("exit_reason","")
-                        and "Take Profit" not in t.get("exit_reason",""))]
-    manual_t  = [t for t in trades if "Manual" in t.get("exit_reason","")]
-    timeout_t = [t for t in trades if "Timeout" in t.get("exit_reason","")
-                 or "timeout" in t.get("exit_reason","").lower()]
-    struct_t  = [t for t in trades if "Structure" in t.get("exit_reason","")
-                 or "structure" in t.get("exit_reason","").lower()]
-
+    # ── Core stats ─────────────────────────────────────────────────────────
+    wins      = [t for t in trades if float(t.get("pl",0)) > 0]
+    losses    = [t for t in trades if float(t.get("pl",0)) < 0]
     total_pl  = round(sum(float(t.get("pl",0)) for t in trades), 2)
     win_rate  = _wr(trades)
     avg_win   = _avg([float(t.get("pl",0)) for t in wins])
     avg_loss  = _avg([float(t.get("pl",0)) for t in losses])
     pf        = _pf(trades)
-    expectancy= round((win_rate/100*avg_win)+((1-win_rate/100)*avg_loss),2)
+    expectancy= round((win_rate/100*avg_win)+((1-win_rate/100)*avg_loss), 2)
 
-    rr_vals   = [float(t.get("rr",0)) for t in trades if float(t.get("rr",0))>0]
-    avg_rr    = _avg(rr_vals)
+    # Planned R:R from database
+    rr_vals     = [float(t.get("rr",0)) for t in trades if float(t.get("rr",0))>0]
+    avg_plan_rr = _avg(rr_vals)
 
-    # ── 1. SAMPLE SIZE ────────────────────────────────────────
-    progress  = min(total, target)
-    conf_lbl  = "Very Low" if total<5 else "Low" if total<10 else "Medium" if total<20 else "High"
+    # Realized R: actual P/L / risk_1r for each trade
+    realized_rs = []
+    for t in trades:
+        r1 = float(t.get("risk_1r",0) or t.get("risk",0))
+        pl = float(t.get("pl",0))
+        if r1 > 0:
+            realized_rs.append(round(pl/r1, 3))
+    avg_realized_r = _avg(realized_rs)
+
+    # ── EXIT CLASSIFICATION (mutually exclusive, uses exit_type) ──────────
+    # Priority: use normalized exit_type field if available
+    # Fallback: use exit_reason string matching
+    def get_type(t):
+        et = t.get("exit_type","")
+        if et and et != "UNKNOWN":
+            return et
+        # Fallback from exit_reason
+        r  = t.get("exit_reason","").lower()
+        pl = float(t.get("pl",0))
+        if "partial tp"   in r: return "PARTIAL_TP"
+        if "take profit"  in r: return "TP"
+        if "timeout"      in r: return "TIMEOUT"
+        if "structure"    in r: return "STRUCTURE"
+        if "manual"       in r: return "MANUAL"
+        if "break-even"   in r or "break_even" in r: return "BREAK_EVEN"
+        # Classify by P/L as last resort
+        if pl > 0.50:  return "PROFIT_LOCK"
+        if pl > -0.10: return "BREAK_EVEN"
+        return "ACTUAL_SL"
+
+    exit_map = {t.get("trade_id",str(i)): get_type(t)
+                for i,t in enumerate(trades)}
+
+    tp_t      = [t for t in trades if exit_map.get(t.get("trade_id",""),"") == "TP"]
+    partial_t = [t for t in trades if exit_map.get(t.get("trade_id",""),"") == "PARTIAL_TP"]
+    pl_t      = [t for t in trades if exit_map.get(t.get("trade_id",""),"") == "PROFIT_LOCK"]
+    be_t      = [t for t in trades if exit_map.get(t.get("trade_id",""),"") == "BREAK_EVEN"]
+    sl_t      = [t for t in trades if exit_map.get(t.get("trade_id",""),"") == "ACTUAL_SL"]
+    timeout_t = [t for t in trades if exit_map.get(t.get("trade_id",""),"") == "TIMEOUT"]
+    struct_t  = [t for t in trades if exit_map.get(t.get("trade_id",""),"") == "STRUCTURE"]
+    manual_t  = [t for t in trades if exit_map.get(t.get("trade_id",""),"") == "MANUAL"]
+
+    # Verify totals add up
+    classified = (len(tp_t)+len(partial_t)+len(pl_t)+len(be_t)+
+                  len(sl_t)+len(timeout_t)+len(struct_t)+len(manual_t))
+
+    # ── 1. SAMPLE SIZE ────────────────────────────────────────────────────
+    sample_lbl = _sample_label(total)
+    target = 50
     recs.append({
-        "priority":"HIGH" if total<target else "INFO",
+        "priority":"HIGH" if total < 30 else "MEDIUM" if total < 50 else "INFO",
         "emoji":"📊",
-        "title":f"Sample Size: {total}/{target} trades — Confidence {conf_lbl}",
+        "title":f"Sample: {total} trades — {sample_lbl}",
         "detail":(
-            f"Progress: {_bar(total,target)} {total}/{target}\n\n"
-            f"Current results: {win_rate}% win rate | ${total_pl:+.2f} P/L | "
+            f"Progress: {_bar(min(total,target),target)} {total}/{target}\n\n"
+            f"Win rate: {win_rate}% | P/L: ${total_pl:+.2f} | "
             f"Profit factor: {pf if pf!=999.0 else '∞'}\n\n"
-            + (f"⚠️ Only {total} trades is NOT enough to validate a strategy. "
-               f"Do not change rules yet. Keep collecting data."
-               if total < target else
-               f"✅ Sufficient data for reliable analysis.")
+            f"{'⚠️ Too few trades to draw conclusions. Do not change rules yet.'
+               if total < 30 else
+               '📊 Enough for preliminary analysis. Patterns are visible but not validated.'
+               if total < 50 else
+               '✅ Meaningful sample. Patterns are more reliable.'}"
         ),
-        "confidence":conf_lbl,
-        "action":("Keep rules unchanged. Collect more data." if total<target
-                  else "Review all recommendations carefully."),
+        "confidence":sample_lbl.split("—")[0].strip(),
+        "action":("Keep rules unchanged. Collect more data." if total < 30
+                  else "Review patterns below carefully." if total < 50
+                  else "Act on high-confidence findings."),
         "evidence":f"{total} completed trades",
     })
 
-    # ── 2. ENGINE HEALTH (separate from strategy) ─────────────
-    engine_score = 100
-    engine_issues = []
+    # ── 2. EXIT QUALITY (mutually exclusive) ─────────────────────────────
+    tp_rate = round(len(tp_t)/max(total,1)*100,1)
+    pl_rate = round(len(pl_t)/max(total,1)*100,1)
+    be_rate = round(len(be_t)/max(total,1)*100,1)
+    sl_rate = round(len(sl_t)/max(total,1)*100,1)
 
-    # Check for journal entries to detect glitches
+    recs.append({
+        "priority":"HIGH" if sl_rate > 50 else "MEDIUM" if tp_rate < 15 else "INFO",
+        "emoji":"🎯",
+        "title":f"Exit Quality: {tp_rate}% TP | {pl_rate}% Profit-lock | {sl_rate}% Real losses",
+        "detail":(
+            f"EXIT BREAKDOWN (mutually exclusive — total = {classified}/{total}):\n\n"
+            f"  ✅ Take Profit:      {len(tp_t)}/{total} ({tp_rate}%)\n"
+            f"  🔒 Profit-lock:     {len(pl_t)}/{total} ({pl_rate}%) — winners protected\n"
+            f"  ⚡ Break-Even:      {len(be_t)}/{total} ({be_rate}%) — $0 after BE\n"
+            f"  ❌ Actual losses:   {len(sl_t)}/{total} ({sl_rate}%) — real money lost\n"
+            f"  ⏱ Timeout:         {len(timeout_t)}/{total}\n"
+            f"  🔄 Structure exit:  {len(struct_t)}/{total}\n"
+            f"  ✋ Manual:          {len(manual_t)}/{total}\n\n"
+            f"  Planned avg R:R:  1:{avg_plan_rr:.2f}\n"
+            f"  Realized avg R:   {avg_realized_r:+.2f}R\n\n"
+            + ("⚠️ Realized R ({avg_realized_r:+.2f}R) is much lower than planned "
+               f"(1:{avg_plan_rr:.2f}). Trades are not running to their intended targets.\n"
+               f"Most likely cause: BE or exit triggers are closing trades too early."
+               if avg_realized_r < avg_plan_rr * 0.4 else
+               f"✅ Realized R is reasonable relative to planned R:R.")
+        ),
+        "confidence":sample_lbl.split("—")[0].strip(),
+        "action":"Review BE trigger timing if BE exits dominate." if be_rate > 15 else "Exit management acceptable.",
+        "evidence":f"TP:{len(tp_t)} PL:{len(pl_t)} BE:{len(be_t)} SL:{len(sl_t)} of {total}",
+    })
+
+    # ── 3. EXPECTANCY (actual measurement, not score) ─────────────────────
+    recs.append({
+        "priority":"HIGH" if expectancy < -0.50 else "MEDIUM" if expectancy < 0 else "INFO",
+        "emoji":"💰",
+        "title":f"Expectancy: ${expectancy:+.2f}/trade | Profit Factor: {pf if pf!=999.0 else '∞'}",
+        "detail":(
+            f"ACTUAL MEASUREMENTS (not scores):\n\n"
+            f"  Expectancy:       ${expectancy:+.2f} per trade\n"
+            f"  Profit factor:    {pf if pf!=999.0 else '∞'} "
+            f"(>1.5 good | >2.0 excellent | <1.0 losing)\n"
+            f"  Average winner:   ${avg_win:+.2f}\n"
+            f"  Average loser:    ${avg_loss:+.2f}\n"
+            f"  Win rate:         {win_rate}%\n"
+            f"  Planned avg R:R:  1:{avg_plan_rr:.2f}\n"
+            f"  Realized avg R:   {avg_realized_r:+.2f}R\n\n"
+            f"  Best trade: ${float(max(trades,key=lambda t:float(t.get('pl',0))).get('pl',0)):+.2f}\n"
+            f"  Worst trade: ${float(min(trades,key=lambda t:float(t.get('pl',0))).get('pl',0)):+.2f}\n\n"
+            + (f"⚠️ Negative expectancy means the strategy loses money on average. "
+               f"This needs to improve before scaling position size."
+               if expectancy < 0 else
+               f"✅ Positive expectancy — the strategy has a mathematical edge. "
+               f"Protect it by maintaining discipline.")
+        ),
+        "confidence":sample_lbl.split("—")[0].strip(),
+        "action":("Investigate exit management before changing entries."
+                  if expectancy < 0 and avg_realized_r < avg_plan_rr * 0.4 else
+                  "Keep current rules. Monitor for 20+ more trades."),
+        "evidence":f"Based on {total} completed trades",
+    })
+
+    # ── 4. ENGINE HEALTH ──────────────────────────────────────────────────
+    health   = 100
+    issues   = []
     try:
         journal = load_journal()
-        open_entries = [j for j in journal if j.get("action")=="OPEN"]
-        # Low confidence opens
-        low_conf = [j for j in open_entries if int(j.get("confidence",100)) < 60]
-        if low_conf:
-            engine_score -= 20
-            engine_issues.append(f"{len(low_conf)} trades opened below 60% confidence — possible rule bypass")
-        # Zero trend strength opens
-        zero_str = [j for j in open_entries if int(j.get("strength",100)) < 10]
-        if zero_str:
-            engine_score -= 25
-            engine_issues.append(f"{len(zero_str)} trades opened with near-zero trend strength — this was the glitch causing bad entries")
+        opens   = [j for j in journal if j.get("action")=="OPEN"]
+        low_c   = [j for j in opens if int(j.get("confidence",100)) < 60]
+        if low_c:
+            health -= 20
+            issues.append(f"{len(low_c)} trades opened below 60% confidence")
     except Exception:
         pass
 
-    # Check for losing streaks
-    recent_pl = [float(t.get("pl",0)) for t in trades[-10:]]
-    streak = cur_streak = 0
-    for pl in recent_pl:
-        if pl < 0: cur_streak += 1; streak = max(streak, cur_streak)
-        else: cur_streak = 0
+    pls = [float(t.get("pl",0)) for t in trades[-10:]]
+    streak = cur = 0
+    for pl in pls:
+        if pl < 0: cur += 1; streak = max(streak, cur)
+        else: cur = 0
     if streak >= 3:
-        engine_score -= 30
-        engine_issues.append(f"Losing streak of {streak} in last 10 trades")
-
-    strategy_score = min(100, int(
-        (win_rate * 0.4) +
-        (min(pf if pf!=999.0 else 3, 3) / 3 * 30) +
-        (30 if expectancy > 0 else 0)
-    ))
+        health -= 30
+        issues.append(f"Losing streak of {streak} in last 10 trades")
 
     recs.append({
-        "priority":"HIGH" if engine_score<70 else "INFO",
+        "priority":"HIGH" if health < 70 else "INFO",
         "emoji":"🏥",
-        "title":f"Engine Health: {engine_score}/100 | Strategy Confidence: {strategy_score}/100",
+        "title":f"Engine Health: {health}/100",
         "detail":(
-            f"ENGINE HEALTH (is the bot working correctly?): {engine_score}/100\n"
-            + ("\n".join(f"  ⚠️ {i}" for i in engine_issues) if engine_issues
+            f"ENGINE (is the bot working correctly?): {health}/100\n"
+            + ("\n".join(f"  ⚠️ {i}" for i in issues) if issues
                else "  ✅ No glitches detected\n")
-            + f"\n\nSTRATEGY CONFIDENCE (is the strategy profitable?): {strategy_score}/100\n"
-            f"  Win Rate: {win_rate}%\n"
-            f"  Profit Factor: {pf if pf!=999.0 else '∞'}\n"
-            f"  Expectancy: ${expectancy:+.2f} per trade\n"
-            f"  Avg Win: ${avg_win:+.2f} | Avg Loss: ${avg_loss:+.2f}"
+            + f"\n\nNOTE: Engine health ≠ strategy performance.\n"
+            f"Health 100 means the code runs correctly.\n"
+            f"Strategy profitability depends on market conditions and rules."
         ),
-        "confidence":conf_lbl,
-        "action":("Fix engine issues above first." if engine_issues
-                  else "Engine running correctly."),
+        "confidence":"High",
+        "action":"Fix engine issues first." if issues else "Engine running correctly.",
         "evidence":f"Based on {total} trades",
     })
 
-    # ── 3. WIN vs TARGET HIT (most important distinction) ─────
-    tp_count  = len(tp_trades)
-    be_count  = len(be_trades)
-    sl_count  = len(sl_trades)
-    win_count = len(wins)
+    # ── 5. BE ANALYSIS ────────────────────────────────────────────────────
+    if len(be_t) > 0:
+        # Calculate R at which BE triggered for each BE trade
+        be_rs = []
+        for t in be_t:
+            r1 = float(t.get("risk_1r",0) or t.get("risk",0))
+            # BE exits close at ~$0 P/L
+            if r1 > 0:
+                be_rs.append(round(2.0 / r1, 2))  # approximate R at old $2 trigger
 
-    # Target capture rate
-    target_rate = round(tp_count/max(total,1)*100,1)
-    be_rate     = round(be_count/max(total,1)*100,1)
+        avg_be_r = _avg(be_rs) if be_rs else 0
 
-    tp_count     = len(tp_trades)
-    be_count     = len(be_trades)
-    pl_count     = len(profit_lock)
-    sl_count     = len(sl_trades)
-    target_rate  = round(tp_count/max(total,1)*100,1)
-    be_rate      = round(be_count/max(total,1)*100,1)
-    pl_rate      = round(pl_count/max(total,1)*100,1)
-    real_sl_rate = round(sl_count/max(total,1)*100,1)
-
-    exit_detail = (
-        f"EXIT BREAKDOWN — corrected classification:\n\n"
-        f"  ✅ Take Profit hit:     {tp_count}/{total} ({target_rate}%)\n"
-        f"  🔒 Profit-lock exit:   {pl_count}/{total} ({pl_rate}%) — winners stopped out profitably\n"
-        f"  ⚡ Break-Even exit:    {be_count}/{total} ({be_rate}%) — $0 after BE triggered\n"
-        f"  ❌ Actual losses (SL): {sl_count}/{total} ({real_sl_rate}%) — real money lost\n"
-        f"  ⏱ Timeout:            {len(timeout_t)}/{total}\n"
-        f"  🔄 Structure exit:     {len(struct_t)}/{total}\n\n"
-        f"  WIN RATE: {win_rate}% | TARGET HIT: {target_rate}%\n\n"
-        + (f"⚠️ Only {target_rate}% of trades reach the intended target. "
-           f"Most profitable exits are profit-lock ({pl_rate}%) not full TP. "
-           f"The BE system was using fixed $2 regardless of risk — now fixed to R-based. "
-           f"Real losses: {real_sl_rate}% of trades."
-           if tp_count < total * 0.3 else
-           f"✅ {target_rate}% target rate — exit management working well.")
-    )
-
-    be_priority = "HIGH" if be_count > total*0.5 and tp_count == 0 else "MEDIUM" if be_count > tp_count else "INFO"
-    recs.append({
-        "priority": be_priority,
-        "emoji":"🎯",
-        "title":f"Exit Quality: {target_rate}% targets hit | {be_rate}% break-even exits",
-        "detail": exit_detail,
-        "confidence": conf_lbl,
-        "action":(
-            "DO NOT change entry rules. The entries are working. "
-            "Investigate whether break-even triggers too early relative to ATR and structure."
-            if be_count > tp_count else
-            "Exit management is working well."
-        ),
-        "evidence":f"TP: {tp_count} | BE: {be_count} | SL: {sl_count} of {total} trades",
-    })
-
-    # ── 4. Break-even efficiency analysis ─────────────────────
-    if be_count >= 2:
         recs.append({
             "priority":"MEDIUM",
             "emoji":"⚡",
-            "title":f"Break-Even Analysis: {be_count} trades exited at break-even",
+            "title":f"Break-Even Analysis: {len(be_t)} trades exited at $0",
             "detail":(
-                f"Break-even protection triggered {be_count} times.\n\n"
-                f"This means Aria correctly protected the trades from turning into losses. "
-                f"However, {be_count} trades that moved in the right direction "
-                f"ended at $0 profit instead of hitting the take profit target.\n\n"
-                f"Possible causes:\n"
-                f"  1. Break-even triggers too early — price pulls back before continuing\n"
-                f"  2. Take profit target is too far for current volatility\n"
-                f"  3. Market is in consolidation — moves stall before target\n"
-                f"  4. Entry timing is slightly late in the move\n\n"
-                f"Current BE trigger: +$2 profit → SL moves to entry\n"
-                f"Current TP target: ~2.5x ATR from entry\n\n"
-                f"DO NOT change until 20+ trades collected."
+                f"{len(be_t)} trades moved in the right direction then closed at $0.\n\n"
+                f"This is the BE system working BUT also shows potential lost opportunity.\n\n"
+                f"The new R-based BE (triggers at +1.25R) should reduce this.\n"
+                f"Previous fixed $2 BE was triggering at different R levels per trade:\n"
+                f"  $5-risk trade → BE at 0.40R (too early)\n"
+                f"  $2-risk trade → BE at 1.00R (reasonable)\n"
+                f"  $0.60-risk trade → BE at 3.33R (too late)\n\n"
+                f"With R-based BE, every trade now BEs at the same +1.25R.\n\n"
+                f"Monitor next 20 trades to see if BE rate decreases.\n"
+                f"DO NOT change further until more data collected."
             ),
-            "confidence":"Low" if total<15 else "Medium",
-            "action":"Monitor for 20+ trades before adjusting BE trigger.",
-            "evidence":f"{be_count} break-even exits of {total} total",
+            "confidence":sample_lbl.split("—")[0].strip(),
+            "action":"Monitor next 20 trades after R-based BE implemented.",
+            "evidence":f"{len(be_t)} BE exits of {total} total",
         })
 
-    # ── 5. Risk/Reward Analysis ───────────────────────────────
-    if rr_vals:
-        recs.append({
-            "priority":"INFO",
-            "emoji":"💰",
-            "title":f"Risk/Reward: Avg 1:{avg_rr:.2f} | Expectancy ${expectancy:+.2f}/trade",
-            "detail":(
-                f"Average planned R:R: 1:{avg_rr:.2f} (minimum required: 1:1.8)\n"
-                f"Expectancy: ${expectancy:+.2f} per trade\n"
-                f"  Positive expectancy = the strategy has a mathematical edge\n"
-                f"  Negative expectancy = losing money long term on average\n\n"
-                f"Profit Factor: {pf if pf!=999.0 else '∞'}\n"
-                f"  > 1.5 = good | > 2.0 = excellent | < 1.0 = losing strategy\n\n"
-                f"Average winner: ${avg_win:+.2f}\n"
-                f"Average loser:  ${avg_loss:+.2f}\n"
-                f"Best trade:     ${float(max(trades,key=lambda t:float(t.get('pl',0))).get('pl',0)):+.2f}\n"
-                f"Worst trade:    ${float(min(trades,key=lambda t:float(t.get('pl',0))).get('pl',0)):+.2f}"
-            ),
-            "confidence":conf_lbl,
-            "action":"Keep R:R minimum at 1.8. Review if avg drops below 1.5.",
-            "evidence":f"{len(rr_vals)} trades with R:R data",
-        })
-
-    # ── 6. Pattern Discovery ──────────────────────────────────
+    # ── 6. PATTERN DISCOVERY ─────────────────────────────────────────────
     btc_t = [t for t in trades if t.get("symbol","")=="BTCUSD"]
     eth_t = [t for t in trades if t.get("symbol","")=="ETHUSD"]
     buy_t = [t for t in trades if t.get("side","")=="BUY"]
@@ -273,51 +292,50 @@ def generate() -> list:
 
     if btc_t and eth_t:
         btc_wr = _wr(btc_t); eth_wr = _wr(eth_t)
-        btc_pl = round(sum(float(t.get("pl",0)) for t in btc_t),2)
-        eth_pl = round(sum(float(t.get("pl",0)) for t in eth_t),2)
-        if abs(btc_wr-eth_wr) >= 20:
-            better = "BTC" if btc_wr>eth_wr else "ETH"
+        if abs(btc_wr - eth_wr) >= 20:
+            better = "BTC" if btc_wr > eth_wr else "ETH"
             recs.append({
                 "priority":"MEDIUM","emoji":"📈",
-                "title":f"{better} performing significantly better",
-                "detail":(f"BTC: {btc_wr}% WR ({len(btc_t)} trades) ${btc_pl:+.2f}\n"
-                          f"ETH: {eth_wr}% WR ({len(eth_t)} trades) ${eth_pl:+.2f}\n\n"
-                          f"Difference of {abs(btc_wr-eth_wr):.0f}% is meaningful."),
-                "confidence":"Low" if total<15 else "Medium",
-                "action":f"Prioritize {better} setups.",
+                "title":f"{better} outperforming significantly",
+                "detail":(
+                    f"BTC: {btc_wr}% WR ({len(btc_t)} trades)\n"
+                    f"ETH: {eth_wr}% WR ({len(eth_t)} trades)\n\n"
+                    f"Difference of {abs(btc_wr-eth_wr):.0f}% may be meaningful "
+                    f"but sample is {'small' if total < 50 else 'moderate'}."
+                ),
+                "confidence":"Low" if total < 30 else "Medium",
+                "action":f"Watch {better} setups. More data needed to confirm.",
                 "evidence":f"{len(btc_t)} BTC + {len(eth_t)} ETH trades",
             })
 
     if buy_t and sell_t and abs(_wr(buy_t)-_wr(sell_t)) >= 25:
-        better = "BUY" if _wr(buy_t)>_wr(sell_t) else "SELL"
+        better = "BUY" if _wr(buy_t) > _wr(sell_t) else "SELL"
         recs.append({
             "priority":"MEDIUM","emoji":"🎯",
-            "title":f"{better} trades outperforming significantly",
-            "detail":(f"BUY: {_wr(buy_t)}% WR ({len(buy_t)} trades)\n"
-                      f"SELL: {_wr(sell_t)}% WR ({len(sell_t)} trades)"),
-            "confidence":"Low" if total<15 else "Medium",
-            "action":f"Be more selective on {'SELL' if better=='BUY' else 'BUY'} entries.",
+            "title":f"{better} trades performing better",
+            "detail":(
+                f"BUY: {_wr(buy_t)}% WR ({len(buy_t)} trades)\n"
+                f"SELL: {_wr(sell_t)}% WR ({len(sell_t)} trades)"
+            ),
+            "confidence":"Low" if total < 30 else "Medium",
+            "action":f"No change yet — needs 50+ trades to confirm.",
             "evidence":f"{len(buy_t)} buys + {len(sell_t)} sells",
         })
 
-    # ── 7. Market Condition Tracking ──────────────────────────
-    bull_t = [t for t in trades if "Bullish" in t.get("trend","")]
-    bear_t = [t for t in trades if "Bearish" in t.get("trend","")]
+    # ── 7. MARKET CONDITION TRACKING ─────────────────────────────────────
     recs.append({
         "priority":"INFO","emoji":"🧠",
-        "title":"Market Condition Tracking — Learning",
+        "title":"Market Condition Tracking",
         "detail":(
-            f"Aria is tracking performance across conditions:\n\n"
-            f"  Bullish structure: {len(bull_t)}/{total} trades | {_wr(bull_t)}% WR\n"
-            f"  Bearish structure: {len(bear_t)}/{total} trades | {_wr(bear_t)}% WR\n"
-            f"  BTC: {len(btc_t)}/{total} | ETH: {len(eth_t)}/{total}\n"
-            f"  BUY: {len(buy_t)}/{total} | SELL: {len(sell_t)}/{total}\n\n"
-            f"Status: {'Learning' if total<target else 'Pattern analysis available'}\n"
-            f"Need {max(0,target-total)} more trades for reliable patterns."
+            f"BTC: {len(btc_t)}/{total} | ETH: {len(eth_t)}/{total}\n"
+            f"BUY: {len(buy_t)}/{total} | SELL: {len(sell_t)}/{total}\n\n"
+            f"No evidence currently justifies changing entry rules.\n"
+            f"Investigate exit management first based on available data.\n\n"
+            f"Needed for stronger conclusions: {max(0,50-total)} more trades."
         ),
-        "confidence":conf_lbl,
-        "action":f"{'Continue collecting data.' if total<target else 'Review patterns above.'}",
-        "evidence":f"{total}/{target} trades collected",
+        "confidence":"Low" if total < 30 else "Preliminary",
+        "action":"Collect more data. Keep rules unchanged.",
+        "evidence":f"{total}/{50} target trades",
     })
 
     return recs
