@@ -462,24 +462,45 @@ def open_trade(symbol: str, side: str, analysis: dict, decision: dict) -> dict:
 # ── Close trade ───────────────────────────────────────────────────────────
 
 def _classify_exit(reason: str, pl: float, partial: float) -> str:
-    """Classify exit by actual outcome, not exit mechanism.
-    Fixes misleading '27/37 Stop Loss' — many were profitable exits."""
+    """
+    Returns normalized exit_reason string.
+    One exit type per trade — mutually exclusive.
+    """
     if partial < 1.0:
         return f"Partial TP (${pl:+.2f})"
     r = reason.lower()
-    if pl < -0.05:
-        return "Actual Loss (SL hit)"
-    elif abs(pl) <= 0.50:
-        return "Break-Even exit"
-    elif "take profit" in r:
+    if "take profit" in r:
         return f"Take Profit (${pl:+.2f})"
-    elif "timeout" in r:
+    if "timeout" in r:
         return f"Timeout (${pl:+.2f})"
-    elif "structure" in r:
+    if "structure" in r:
         return f"Structure exit (${pl:+.2f})"
-    elif pl > 0.50:
+    if "manual" in r:
+        return f"Manual close (${pl:+.2f})"
+    # Now classify by actual P/L
+    if pl > 0.50:
         return f"Profit-lock exit (${pl:+.2f})"
-    return reason
+    elif pl > -0.10:
+        return "Break-Even exit"
+    else:
+        return f"Actual Loss (${pl:+.2f})"
+
+
+def _get_exit_type(reason: str, pl: float, partial: float) -> str:
+    """
+    Normalized exit_type for database — exactly ONE value per trade.
+    TP | PARTIAL_TP | PROFIT_LOCK | BREAK_EVEN | ACTUAL_SL | STRUCTURE | TIMEOUT | MANUAL
+    """
+    if partial < 1.0:
+        return "PARTIAL_TP"
+    r = reason.lower()
+    if "take profit" in r:    return "TP"
+    if "timeout"     in r:    return "TIMEOUT"
+    if "structure"   in r:    return "STRUCTURE"
+    if "manual"      in r:    return "MANUAL"
+    if pl > 0.50:             return "PROFIT_LOCK"
+    if pl > -0.10:            return "BREAK_EVEN"
+    return "ACTUAL_SL" 
 
 
 def close_trade(position: dict, price: float,
@@ -530,6 +551,8 @@ def close_trade(position: dict, price: float,
             "new_balance": new_balance,
             "duration":    duration,
             "exit_reason": _classify_exit(reason, pl, partial),
+                "exit_type":  _get_exit_type(reason, pl, partial),
+                "risk_1r":    round(risk_1r, 2),
             "mode":        "STRUCTURED",
             "opened_at":   str(position.get("opened_at","")),
         })
@@ -549,6 +572,8 @@ def close_trade(position: dict, price: float,
             "new_balance": new_balance,
             "duration":    duration,
             "exit_reason": _classify_exit(reason, pl, partial),
+                "exit_type":  _get_exit_type(reason, pl, partial),
+                "risk_1r":    round(risk_1r, 2),
             "closed_at":   datetime.utcnow().isoformat(),
         })
 
@@ -604,12 +629,14 @@ def manage_position(position: dict, price: float,
         # Only exit immediately if at a loss or tiny profit
         # If trade is profitable, let milestones protect it
         if not structure_still_valid(position, analysis):
-            if fl >= 2.0:
-                # Good profit - hold, milestones are protecting
-                _log(f"Structure shifted but +${fl:.2f} profit — "
-                     f"milestones protecting #{position.get('trade_id','')}")
+            # Use R-based threshold - hold if >= 1R profit (milestones protecting)
+            risk_1r_check = float(position.get("risk_1r") or
+                                  position.get("risk_amount") or 2.0)
+            if fl >= risk_1r_check:
+                _log(f"Structure shifted but +{fl/risk_1r_check:.1f}R profit "
+                     f"(${fl:.2f}) — milestones protecting "
+                     f"#{position.get('trade_id','')}")
             else:
-                # Loss or tiny profit with broken structure - exit
                 reason = (f"Structure invalidated — "
                           f"{analysis.get('ms',{}).get('trend','')} reversed "
                           f"(P/L ${fl:+.2f})")
