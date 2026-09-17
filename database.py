@@ -73,6 +73,17 @@ def setup_database():
                 except Exception:
                     pass
 
+            # Migrate trade_history table
+            history_cols = [
+                ("exit_type", "VARCHAR(20) DEFAULT 'UNKNOWN'"),
+                ("risk_1r",   "NUMERIC(10,2) DEFAULT 0"),
+            ]
+            for col, definition in history_cols:
+                try:
+                    cur.execute(f"ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS {col} {definition}")
+                except Exception:
+                    pass
+
             # Trade history
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS trade_history (
@@ -90,6 +101,7 @@ def setup_database():
                     new_balance  NUMERIC(12,2),
                     duration     VARCHAR(20),
                     exit_reason  VARCHAR(200),
+                    exit_type    VARCHAR(20)   DEFAULT 'UNKNOWN',
                     confidence   INTEGER       DEFAULT 0,
                     session      VARCHAR(20),
                     trend        VARCHAR(20),
