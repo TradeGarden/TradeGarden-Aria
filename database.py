@@ -75,8 +75,14 @@ def setup_database():
 
             # Migrate trade_history table
             history_cols = [
-                ("exit_type", "VARCHAR(20) DEFAULT 'UNKNOWN'"),
-                ("risk_1r",   "NUMERIC(10,2) DEFAULT 0"),
+                ("exit_type",    "VARCHAR(20) DEFAULT 'UNKNOWN'"),
+                ("risk_1r",      "NUMERIC(10,2) DEFAULT 0"),
+                ("mfe",          "NUMERIC(10,4) DEFAULT 0"),
+                ("mae",          "NUMERIC(10,4) DEFAULT 0"),
+                ("mfe_r",        "NUMERIC(8,3) DEFAULT 0"),
+                ("mae_r",        "NUMERIC(8,3) DEFAULT 0"),
+                ("be_trigger_r", "NUMERIC(8,3) DEFAULT 0"),
+                ("realized_r",   "NUMERIC(8,3) DEFAULT 0"),
             ]
             for col, definition in history_cols:
                 try:
@@ -102,6 +108,12 @@ def setup_database():
                     duration     VARCHAR(20),
                     exit_reason  VARCHAR(200),
                     exit_type    VARCHAR(20)   DEFAULT 'UNKNOWN',
+                    mfe          NUMERIC(10,4) DEFAULT 0,
+                    mae          NUMERIC(10,4) DEFAULT 0,
+                    mfe_r        NUMERIC(8,3)  DEFAULT 0,
+                    mae_r        NUMERIC(8,3)  DEFAULT 0,
+                    be_trigger_r NUMERIC(8,3)  DEFAULT 0,
+                    realized_r   NUMERIC(8,3)  DEFAULT 0,
                     confidence   INTEGER       DEFAULT 0,
                     session      VARCHAR(20),
                     trend        VARCHAR(20),
