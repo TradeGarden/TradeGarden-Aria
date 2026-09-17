@@ -415,6 +415,9 @@ def open_trade(symbol: str, side: str, analysis: dict, decision: dict) -> dict:
             "trail_sl":       False,
             "atr_at_open":    atr,
             "sl_dist":        calc["sl_dist"],
+            "mfe":            0.0,
+            "mae":            0.0,
+            "be_trigger_r":   0.0,
         }
         save_position(position)
 
@@ -553,6 +556,12 @@ def close_trade(position: dict, price: float,
             "exit_reason": _classify_exit(reason, pl, partial),
                 "exit_type":  _get_exit_type(reason, pl, partial),
                 "risk_1r":    round(risk_1r, 2),
+                "mfe":        round(position.get("mfe", 0), 3),
+                "mae":        round(position.get("mae", 0), 3),
+                "mfe_r":      round(position.get("mfe", 0), 3),
+                "mae_r":      round(position.get("mae", 0), 3),
+                "be_trigger_r": round(position.get("be_trigger_r", 0), 3),
+                "realized_r": round(pl / max(risk_1r, 0.01), 3),
             "mode":        "STRUCTURED",
             "opened_at":   str(position.get("opened_at","")),
         })
@@ -574,6 +583,12 @@ def close_trade(position: dict, price: float,
             "exit_reason": _classify_exit(reason, pl, partial),
                 "exit_type":  _get_exit_type(reason, pl, partial),
                 "risk_1r":    round(risk_1r, 2),
+                "mfe":        round(position.get("mfe", 0), 3),
+                "mae":        round(position.get("mae", 0), 3),
+                "mfe_r":      round(position.get("mfe", 0), 3),
+                "mae_r":      round(position.get("mae", 0), 3),
+                "be_trigger_r": round(position.get("be_trigger_r", 0), 3),
+                "realized_r": round(pl / max(risk_1r, 0.01), 3),
             "closed_at":   datetime.utcnow().isoformat(),
         })
 
@@ -670,6 +685,18 @@ def manage_position(position: dict, price: float,
         except Exception:
             pass
 
+        # ── Track MFE and MAE continuously ───────────────────────────────
+        _risk_now = float(position.get("risk_1r") or
+                          position.get("risk_amount") or 1.0)
+        if _risk_now > 0:
+            _cur_r = fl / _risk_now
+            if _cur_r > position.get("mfe", 0.0):
+                position["mfe"] = round(_cur_r, 3)
+                save_position(position)
+            if _cur_r < position.get("mae", 0.0):
+                position["mae"] = round(_cur_r, 3)
+                save_position(position)
+
         # ══════════════════════════════════════════════════════════════
         # R-BASED MILESTONE SYSTEM (fixed from document analysis)
         #
@@ -700,6 +727,8 @@ def manage_position(position: dict, price: float,
                 position["be_moved"]  = True
                 save_position(position)
                 r_now = round(fl / risk_1r, 2)
+                position["be_trigger_r"] = r_now
+                save_position(position)
                 append_trade({
                     "action":    "SL_MOVED_BE",
                     "trade_id":  position.get("trade_id",""),
