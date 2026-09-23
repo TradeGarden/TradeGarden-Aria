@@ -157,8 +157,8 @@ def fetch_current_price(symbol: str) -> float:
             key    = list(result.keys())[0] if result else None
             if key:
                 return float(result[key]["c"][0])
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"[ARIA] {fname} error: {_e}")
 
     # CoinGecko fallback
     coin = "bitcoin" if "BTC" in symbol else "ethereum"
@@ -170,8 +170,8 @@ def fetch_current_price(symbol: str) -> float:
         )
         if r.status_code == 200:
             return float(r.json()[coin]["usd"])
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"[ARIA] {fname} error: {_e}")
 
     return 62000.0 if "BTC" in symbol else 3400.0
 
