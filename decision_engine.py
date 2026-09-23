@@ -535,8 +535,8 @@ def generate_narrative(analysis: dict, decision: str, reasons: list) -> str:
                 temperature=0.3,
             )
             return resp.choices[0].message.content.strip()
-        except Exception:
-            pass
+        except Exception as _e:
+            print(f"[ARIA] {fname} error: {_e}")
 
     # Professional fallback narrative
     if decision == "WAIT":
