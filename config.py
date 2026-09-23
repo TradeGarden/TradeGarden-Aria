@@ -26,6 +26,8 @@ DAILY_LOSS_LIMIT_PCT = 5.0    # Stop if down 5% today
 
 # ── Entry Quality ──────────────────────────────────────────────
 MIN_RISK_REWARD        = 1.8   # Minimum 1.8:1 R:R
+MIN_PLANNED_TP_USD     = 0.0   # Minimum planned TP in dollars (0 = disabled)
+                               # Set to 8.0 to require $8+ opportunity per trade
 SL_ATR_MULTIPLIER      = 2.0   # Stop = 2.0x ATR - gives trades room to breathe
 TP_ATR_MULTIPLIER      = 4.5   # Initial TP = 4.5x ATR - R:R stays 2.25:1 with wider SL
 MIN_CONFIDENCE         = 70    # 70%+ confidence required
