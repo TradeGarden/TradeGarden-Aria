@@ -72,8 +72,8 @@ async def lifespan(app: FastAPI):
     yield
     try:
         stop_auto_trading()
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"[ARIA] {fname} error: {_e}")
 
 
 app = FastAPI(title="Aria AI Trading Engine", lifespan=lifespan)
@@ -564,12 +564,12 @@ async def dashboard(symbol: str = "BTCUSD"):
       <h4>EMA · RSI · MACD · ATR</h4>
       <div class="explain">EMA trend · RSI momentum · MACD crossover · ATR volatility</div>
       <div class="stat-grid">
-        <div class="stat"><div class="v">${analysis['ema20']:,.0f}</div><div class="l">EMA 20</div></div>
-        <div class="stat"><div class="v">${analysis['ema50']:,.0f}</div><div class="l">EMA 50</div></div>
+        <div class="stat"><div class="v">$(f"(f"{analysis['ema20']:,.0f}" if analysis.get('ema20') else 'N/A')" if analysis.get('ema20') else 'N/A')</div><div class="l">EMA 20</div></div>
+        <div class="stat"><div class="v">$(f"(f"{analysis['ema50']:,.0f}" if analysis.get('ema50') else 'N/A')" if analysis.get('ema50') else 'N/A')</div><div class="l">EMA 50</div></div>
         <div class="stat"><div class="v" style="color:{'#e74c3c' if analysis['rsi_label']=='Overbought' else '#2ecc71' if analysis['rsi_label']=='Oversold' else '#888'}">{analysis['rsi14']}</div><div class="l">RSI · {analysis['rsi_label']}</div></div>
         <div class="stat"><div class="v">{analysis['macd_line']:+.0f}</div><div class="l">MACD</div></div>
         <div class="stat"><div class="v">{analysis['macd_signal']:+.0f}</div><div class="l">Signal</div></div>
-        <div class="stat"><div class="v">${analysis['atr14']:,.0f}</div><div class="l">ATR 14</div></div>
+        <div class="stat"><div class="v">$(f"{analysis['atr14']:,.0f}" if analysis.get('atr14') else 'N/A')</div><div class="l">ATR 14</div></div>
       </div>
     </div>
 
