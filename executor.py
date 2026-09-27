@@ -33,10 +33,13 @@ from config import (
     DAILY_LOSS_LIMIT_PCT, MIN_PLANNED_TP_USD,
 )
 from database import (
-    save_closed_trade, append_trade, load_journal,
-    load_balance, save_balance,
-    get_open_positions, get_open_positions_count,
-    save_position, close_position_in_db, load_position,
+    append_trade,
+    load_balance,
+    get_open_positions,
+    get_open_positions_count,
+    save_position,
+    finalize_trade,
+    finalize_partial_close,
 )
 
 import threading
@@ -133,7 +136,6 @@ def compute_confidence(analysis: dict, decision: str) -> dict:
         elif 25 <= r < 35: scores["RSI"] = 6
 
     # 4. Candle strength (max 20) — price action only, no volume
-    avg_vol = vol.get("avg20", 0)
     scores["Candle Strength"] = candle_strength(candles, e20)
 
     # 5. Volume (max 15) — counted once here only
@@ -214,14 +216,15 @@ def _get_exit_type(reason: str, pl: float, partial: float) -> str:
         return "PARTIAL_TP"
     r = reason.lower()
     if "take profit"  in r: return "TP"
-    if "trailing stop" in r or "trail" in r: return "PROFIT_LOCK"
-    if "stop loss"    in r: return "ACTUAL_SL"
-    if "timeout"      in r: return "TIMEOUT"
-    if "structure"    in r: return "STRUCTURE"
-    if "manual"       in r: return "MANUAL"
-    if "profit lock"  in r or "locked" in r: return "PROFIT_LOCK"
-    if "break-even"   in r or "breakeven" in r or "be" in r: return "BREAK_EVEN"
-    if "partial"      in r: return "PARTIAL_TP"
+    # Order matters — most specific first
+    if "trailing stop" in r or "trail stop" in r: return "PROFIT_LOCK"
+    if "profit lock"   in r or "profit locked" in r: return "PROFIT_LOCK"
+    if "break-even stop" in r or "breakeven stop" in r: return "BREAK_EVEN"
+    if "stop loss"     in r:  return "ACTUAL_SL"
+    if "timeout"       in r:  return "TIMEOUT"
+    if "structure"     in r:  return "STRUCTURE"
+    if "manual"        in r:  return "MANUAL"
+    if "partial tp"    in r or "partial take" in r: return "PARTIAL_TP"
     return "UNKNOWN"
 
 
@@ -307,8 +310,9 @@ def structure_still_valid(position: dict, analysis: dict) -> bool:
         if side == "SELL" and r < 15: return False
 
         return True
-    except Exception:
-        return True
+    except Exception as _e:
+        _log(f"Structure validation error: {_e} — failing closed for safety")
+        return False  # fail-closed: unknown state = exit to protect capital
 
 
 # ── Check rules ───────────────────────────────────────────────────────────
@@ -433,10 +437,8 @@ def close_trade(position: dict, price: float,
         previous_realized  = float(position.get("realized_pl") or 0)
         total_realized     = round(previous_realized + pl, 2)
 
-        # Update balance exactly once
-        balance     = load_balance()
-        new_balance = round(balance + pl, 2)
-        save_balance(new_balance)
+        # Balance is updated atomically inside finalize_trade/finalize_partial_close
+        # Do NOT update balance here — that would break atomicity
 
         # Duration
         duration = ""
@@ -451,11 +453,8 @@ def close_trade(position: dict, price: float,
 
         # ── PARTIAL CLOSE ────────────────────────────────────────────
         if partial < 1.0:
-            position["size"]           = round(current_size - close_size, 6)
-            position["partial_closed"] = True
-            position["realized_pl"]    = total_realized
-            save_position(position)
-            append_trade({
+            new_size    = round(current_size - close_size, 6)
+            journal_evt = {
                 "action":            "PARTIAL_TP",
                 "trade_id":          position.get("trade_id",""),
                 "symbol":            position["symbol"],
@@ -468,13 +467,34 @@ def close_trade(position: dict, price: float,
                 "realized_pl_total": total_realized,
                 "reason":            reason,
                 "timestamp":         datetime.utcnow().isoformat(),
-            })
+            }
+            ok, new_balance = finalize_partial_close(
+                trade_id    = position.get("trade_id",""),
+                pl          = pl,
+                new_size    = new_size,
+                realized_pl = total_realized,
+                mfe         = position.get("mfe",0),
+                mae         = position.get("mae",0),
+                mfe_r       = position.get("mfe_r",0),
+                mae_r       = position.get("mae_r",0),
+                be_trigger_r= position.get("be_trigger_r",0),
+                journal_event = journal_evt,
+            )
+            if not ok:
+                _log(f"PARTIAL CLOSE FAILED for #{position.get('trade_id','')} "
+                     f"— position state may be inconsistent")
+                return {"success":False,"reason":"Partial close DB transaction failed"}
+            # Update in-memory position after successful DB commit
+            position["size"]           = new_size
+            position["partial_closed"] = True
+            position["realized_pl"]    = total_realized
             return {
                 "success":        True,
                 "partial":        True,
                 "realized_pl":    total_realized,
+                "new_balance":    new_balance,
                 "closed_size":    close_size,
-                "remaining_size": position["size"],
+                "remaining_size": new_size,
             }
 
         # ── FULL CLOSE ───────────────────────────────────────────────
@@ -482,44 +502,52 @@ def close_trade(position: dict, price: float,
         initial_size = float(position.get("initial_size") or current_size)
         realized_r   = round(total_realized / risk_1r, 3) if risk_1r > 0 else 0
 
-        save_closed_trade({
-            "trade_id":           position.get("trade_id",""),
-            "symbol":             position["symbol"],
-            "side":               side,
-            "entry":              entry,
-            "exit":               price,
-            "stop_loss":          position.get("stop_loss",0),
-            "take_profit":        position.get("take_profit",0),
-            "size":               initial_size,
-            "risk":               risk_1r,
-            "risk_1r":            risk_1r,
-            "pl":                 total_realized,        # total, not just final portion
-            "realized_r":         realized_r,
-            "realized_pl":        total_realized,
-            "mfe":                position.get("mfe",0),
-            "mae":                position.get("mae",0),
-            "mfe_r":              position.get("mfe_r",0),
-            "mae_r":              position.get("mae_r",0),
-            "be_trigger_r":       position.get("be_trigger_r",0),
-            "planned_rr":         position.get("planned_rr",  position.get("rr",0)),
-            "planned_tp_r":       position.get("planned_tp_r", 0),
-            "planned_tp_dollars": position.get("planned_tp_dollars",0),
-            "confidence":         position.get("confidence",0),
-            "mode":               position.get("trade_mode","STRUCTURED"),
-            "exit_reason":        _classify_exit(reason, total_realized, 1.0),
-            "exit_type":          _get_exit_type(reason, total_realized, 1.0),
-            "duration":           duration,
-            "new_balance":        new_balance,
-            "session":            position.get("session",""),
-            "trend":              position.get("entry_trend",""),
-            "structure":          position.get("entry_structure",""),
-            "rsi":                position.get("entry_rsi",0),
-            "rr":                 position.get("rr",0),
-            "opened_at":          str(position.get("opened_at","")),
-        })
+        # save_closed_trade handled atomically by finalize_trade above
 
-        # ONLY NOW remove live position
-        close_position_in_db(position.get("trade_id",""))
+        # Atomic: balance + trade_history + position close in one transaction
+        from database import finalize_trade
+        atomic_ok, new_balance = finalize_trade(
+            trade_id    = position.get("trade_id",""),
+            pl          = total_realized,
+            closed_trade= {
+                "trade_id":           position.get("trade_id",""),
+                "symbol":             position["symbol"],
+                "side":               side,
+                "entry":              entry,
+                "exit":               price,
+                "stop_loss":          position.get("stop_loss",0),
+                "take_profit":        position.get("take_profit",0),
+                "size":               initial_size,
+                "risk":               risk_1r,
+                "risk_1r":            risk_1r,
+                "pl":                 total_realized,
+                "duration":           duration,
+                "exit_reason":        _classify_exit(reason, total_realized, 1.0),
+                "exit_type":          _get_exit_type(reason, total_realized, 1.0),
+                "mfe":                position.get("mfe",0),
+                "mae":                position.get("mae",0),
+                "mfe_r":              position.get("mfe_r",0),
+                "mae_r":              position.get("mae_r",0),
+                "be_trigger_r":       position.get("be_trigger_r",0),
+                "realized_r":         realized_r,
+                "planned_rr":         position.get("planned_rr", position.get("rr",0)),
+                "planned_tp_r":       position.get("planned_tp_r",0),
+                "planned_tp_dollars": position.get("planned_tp_dollars",0),
+                "confidence":         position.get("confidence",0),
+                "mode":               position.get("trade_mode","STRUCTURED"),
+                "session":            position.get("session",""),
+                "trend":              position.get("entry_trend",""),
+                "structure":          position.get("entry_structure",""),
+                "rsi":                position.get("entry_rsi",0),
+                "opened_at":          str(position.get("opened_at","")),
+            }
+        )
+        if not atomic_ok:
+            _log(f"CRITICAL: finalize_trade failed #{position.get('trade_id','')} "
+                 f"— position may still appear open")
+            return {"success":False,"reason":"DB transaction failed","pl":0,
+                    "new_balance":load_balance(),"duration":duration,"r_multiple":0}
+        # new_balance is from the atomic DB transaction — do NOT call save_balance again
 
         append_trade({
             "action":            "CLOSE",
@@ -584,7 +612,8 @@ def open_trade(symbol: str, decision: dict, analysis: dict,
         # Normalize + validate inputs
         symbol = str(symbol).strip().upper()
         side   = str(side).strip().upper()
-        if symbol not in VALID_SYMBOLS:
+        VALID_U = {str(s).strip().upper() for s in VALID_SYMBOLS}
+        if symbol not in VALID_U:
             return {"success":False,"reason":f"Invalid symbol: {symbol}"}
         if side not in ("BUY","SELL"):
             return {"success":False,"reason":f"Invalid side: {side}"}
@@ -619,9 +648,9 @@ def open_trade(symbol: str, decision: dict, analysis: dict,
 
         # Hard cap
         if calc["risk_1r"] > MAX_RISK_USD:
-            calc["size"]            = round(MAX_RISK_USD / sl_d, 6)
-            calc["risk_1r"]         = MAX_RISK_USD
-            calc["expected_profit"] = round(calc["size"] * tp_d, 2)
+            calc["size"]    = round(MAX_RISK_USD / sl_d, 6)
+            calc["risk_1r"] = round(calc["size"] * sl_d, 2)  # recalculate after cap
+        calc["expected_profit"] = round(calc["size"] * tp_d, 2)
 
         rr = calc["rr"]
 
@@ -632,13 +661,18 @@ def open_trade(symbol: str, decision: dict, analysis: dict,
 
         trade_id = str(uuid.uuid4())[:8].upper()
 
-        # Determine entry timeframe from MTF analysis
+        # Determine entry timeframe — lowest aligned TF (not order-dependent)
         frames = analysis.get("frames",[])
-        entry_tf = ""
-        for f in reversed(frames):  # prefer lower TF for timing
-            if f.get("decision") == side:
-                entry_tf = f.get("label","")
-                break
+        TF_RANK = {"15M":15,"15m":15,"1H":60,"4H":240,"DAILY":1440,"1D":1440}
+        aligned_tfs = [f for f in frames
+                       if str(f.get("decision","")).upper() == side.upper()]
+        if aligned_tfs:
+            entry_tf = min(
+                aligned_tfs,
+                key=lambda f: TF_RANK.get(str(f.get("label","")).upper(), 9999)
+            ).get("label","")
+        else:
+            entry_tf = ""
 
         position = {
             "trade_id":          trade_id,
@@ -676,7 +710,7 @@ def open_trade(symbol: str, decision: dict, analysis: dict,
             "be_trigger_r":      0.0,
             "opened_at":         datetime.utcnow().isoformat(),
             "status":            "OPEN",
-            "sl_moved_at":       "",
+            "sl_moved_at":       None,
         }
 
         save_position(position)
@@ -741,10 +775,14 @@ def manage_position(position: dict, price: float,
         tp      = float(position["take_profit"])
         side    = position["side"]
         size    = float(position.get("size",0))
-        risk_1r = float(position.get("risk_1r") or
-                        position.get("risk_amount") or 2.0)
+        risk_1r = float(
+            position.get("risk_1r") or
+            position.get("risk_amount") or 0
+        )
         if risk_1r <= 0:
-            risk_1r = 2.0
+            _log(f"Missing risk_1r for #{position.get('trade_id','')} "
+                 f"— refusing to manage position.")
+            return {"status":"ERROR","reason":"Missing risk_1r"}
 
         # ── Three separate P/L concepts ───────────────────────────────────
         # current_pl   = money at stake on REMAINING position (for SL/TP)
@@ -796,12 +834,29 @@ def manage_position(position: dict, price: float,
         # ── Hard SL/TP ───────────────────────────────────────────────────
         if side == "BUY":
             if price <= sl:
-                close_trade(position, price, "Stop Loss hit"); return True
+                # Classify stop based on what kind of stop it is
+                if position.get("trail_sl",False):
+                    sl_reason = "Trailing stop hit"
+                elif position.get("profit_locked",False):
+                    sl_reason = "Profit lock hit"
+                elif position.get("be_moved",False):
+                    sl_reason = "Break-even stop hit"
+                else:
+                    sl_reason = "Stop Loss hit"
+                close_trade(position, price, sl_reason); return True
             if price >= tp:
                 close_trade(position, price, "Take Profit hit"); return True
         else:
             if price >= sl:
-                close_trade(position, price, "Stop Loss hit"); return True
+                if position.get("trail_sl",False):
+                    sl_reason = "Trailing stop hit"
+                elif position.get("profit_locked",False):
+                    sl_reason = "Profit lock hit"
+                elif position.get("be_moved",False):
+                    sl_reason = "Break-even stop hit"
+                else:
+                    sl_reason = "Stop Loss hit"
+                close_trade(position, price, sl_reason); return True
             if price <= tp:
                 close_trade(position, price, "Take Profit hit"); return True
 
@@ -835,9 +890,14 @@ def manage_position(position: dict, price: float,
                 close_trade(position, price,
                             f"Max hold {MAX_HOLD_DAYS}d reached (${fl:.2f})")
                 return True
-            if hours_open >= timeout_h and fl < MIN_PROFIT_TO_HOLD:
+            # Total P/L = realized partials + current remaining position
+            total_trade_pl = float(position.get("realized_pl",0)) + current_pl
+            total_r_now    = total_trade_pl / risk_1r if risk_1r > 0 else 0
+            min_r_hold     = 0.3  # configurable: move to MIN_TIMEOUT_PROGRESS_R in config
+            if hours_open >= timeout_h and total_r_now < min_r_hold:
                 close_trade(position, price,
-                            f"Timeout {hours_open:.1f}h no progress (${fl:.2f})")
+                            f"Timeout {hours_open:.1f}h no progress "
+                            f"({total_r_now:+.2f}R / ${total_trade_pl:.2f})")
                 return True
             if hours_open >= 48 and not position.get("partial_closed"):
                 close_trade(position, price,
@@ -861,7 +921,7 @@ def manage_position(position: dict, price: float,
                 position["stop_loss"] = new_sl
                 position["be_moved"]  = True
                 r_now = round(fl / risk_1r, 2)
-                position["be_trigger_r"] = r_now
+                position["be_trigger_r"] = round(excursion_r, 3)
                 save_position(position)
                 append_trade({
                     "action":    "SL_MOVED_BE",
@@ -869,8 +929,8 @@ def manage_position(position: dict, price: float,
                     "symbol":    position["symbol"],
                     "new_sl":    new_sl,
                     "old_sl":    sl,
-                    "profit_at": round(fl, 2),
-                    "r_at_move": r_now,
+                    "profit_at": round(excursion_pl, 2),
+                    "r_at_move": round(excursion_r, 3),
                     "timestamp": datetime.utcnow().isoformat(),
                 })
                 _log(f"BE @ ${new_sl:,.2f} | +{r_now}R (${fl:.2f}) "
@@ -949,7 +1009,8 @@ def manage_position(position: dict, price: float,
 
     except Exception as e:
         _log(f"manage_position error: {e}")
-        return False
+        # Return dict so caller can distinguish ERROR from NOT_CLOSED
+        return {"status":"ERROR","reason":str(e)}
 
 
 # ── Auto trading loop ─────────────────────────────────────────────────────
@@ -971,7 +1032,10 @@ def _auto_loop():
             except Exception as _e:
                 _log(f"Account load error: {_e}")
 
-            balance = float(account["balance"]) if account else 500.0
+            if not account:
+                _log("CRITICAL: account unavailable — skipping cycle.")
+                import time; time.sleep(SCAN_INTERVAL_SECONDS); continue
+            balance = float(account["balance"])
 
             for symbol in VALID_SYMBOLS:
                 try:
@@ -986,13 +1050,21 @@ def _auto_loop():
 
                     # Manage open positions
                     closed_this_scan = False
-                    for pos in [p for p in get_open_positions()
-                                if p["symbol"] == symbol]:
+                    try:
+                        open_pos = get_open_positions()
+                    except Exception as _db_e:
+                        _log(f"DB ERROR getting positions — skipping {symbol}: {_db_e}")
+                        continue
+                    for pos in [p for p in open_pos if p["symbol"] == symbol]:
                         try:
-                            was_closed = manage_position(pos, price,
+                            result_mp  = manage_position(pos, price,
                                             analysis.get("atr14",0), analysis)
-                            if was_closed:
+                            if result_mp is True:
                                 closed_this_scan = True
+                            elif isinstance(result_mp, dict):
+                                if result_mp.get("status") == "ERROR":
+                                    _log(f"manage ERROR {symbol}: "
+                                         f"{result_mp.get('reason','')}")
                         except Exception as _e:
                             _log(f"manage error {symbol}: {_e}")
 
