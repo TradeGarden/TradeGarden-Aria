@@ -38,9 +38,26 @@ from database import (
     get_open_positions,
     get_open_positions_count,
     save_position,
+    create_position,
+    update_position_state,
     finalize_trade,
     finalize_partial_close,
+    load_closed_trades_today,
 )
+
+def save_position(position: dict):
+    """Backward compat shim — routes to create_position or update_position_state."""
+    tid = (position.get("trade_id") or "").strip()
+    if not tid:
+        return
+    try:
+        update_position_state(tid, position)
+    except Exception:
+        try:
+            create_position(position)
+        except Exception as e:
+            print(f"[EXEC] save_position shim failed for {tid}: {e}")
+
 
 import threading
 _auto_thread  = None
@@ -189,7 +206,7 @@ def calc_position(balance: float, price: float, atr: float,
         tp = round(price - tp_dist, 2)
 
     rr   = round(tp_dist / sl_dist, 2)
-    size = round(risk_1r / sl_dist, 6)
+    size = round(risk_1r / sl_dist, 8)
     expected = round(size * tp_dist, 2)
 
     return {
@@ -260,23 +277,35 @@ def get_timeout_hours(position: dict) -> float:
 # ── Daily loss check ──────────────────────────────────────────────────────
 
 def todays_trade_count() -> int:
+    """
+    Count positions ENTERED today (open + closed).
+    MAX_TRADES_PER_DAY limits entries, not completions.
+    RAISES if DB unavailable.
+    """
+    today = datetime.utcnow().date().isoformat()
     try:
-        from database import load_closed_trades_today
-        return len(load_closed_trades_today())
+        open_today = sum(
+            1 for p in get_open_positions()
+            if str(p.get("opened_at","")).startswith(today)
+        )
     except Exception:
-        from database import load_closed_trades
-        return len(load_closed_trades(1))
+        open_today = 0
+    closed_today = len(load_closed_trades_today())  # raises on DB error
+    return open_today + closed_today
 
 
 def todays_loss_pct(balance: float) -> float:
-    """Calculate total realized loss today as % of balance."""
-    try:
-        from database import load_closed_trades_today
-        trades = load_closed_trades_today()
-    except Exception:
-        from database import load_closed_trades
-        trades = load_closed_trades(1)
-    losses = sum(float(t.get("pl",0)) for t in trades if float(t.get("pl",0)) < 0)
+    """
+    Calculate total realized loss today as % of balance.
+    RAISES if DB unavailable — caller must block trading on failure.
+    """
+    trades = load_closed_trades_today()  # raises on DB error
+    # total_pl = cumulative whole-trade P/L (partials included) — correct for daily loss
+    losses = sum(
+        float(t.get("total_pl", t.get("pl",0)))
+        for t in trades
+        if float(t.get("total_pl", t.get("pl",0))) < 0
+    )
     return round(abs(losses) / balance * 100, 2) if balance > 0 else 0.0
 
 
@@ -327,12 +356,18 @@ def check_rules(symbol: str, side: str, analysis: dict,
     atr    = analysis.get("atr14",  0)
 
     # Hard limits
-    if get_open_positions_count() >= MAX_OPEN_POSITIONS:
-        return {"approved":False,"reason":f"Max {MAX_OPEN_POSITIONS} positions open."}
-    if todays_trade_count() >= MAX_TRADES_PER_DAY:
-        return {"approved":False,"reason":f"Daily ceiling of {MAX_TRADES_PER_DAY} trades reached."}
-    if todays_loss_pct(balance) >= DAILY_LOSS_LIMIT_PCT:
-        return {"approved":False,"reason":f"Daily loss limit {DAILY_LOSS_LIMIT_PCT}% hit."}
+    try:
+        if get_open_positions_count() >= MAX_OPEN_POSITIONS:
+            return {"approved":False,"reason":f"Max {MAX_OPEN_POSITIONS} positions open."}
+    except Exception as _e:
+        return {"approved":False,"reason":f"DB error checking positions: {_e}"}
+    try:
+        if todays_trade_count() >= MAX_TRADES_PER_DAY:
+            return {"approved":False,"reason":f"Daily ceiling of {MAX_TRADES_PER_DAY} trades reached."}
+        if todays_loss_pct(balance) >= DAILY_LOSS_LIMIT_PCT:
+            return {"approved":False,"reason":f"Daily loss limit {DAILY_LOSS_LIMIT_PCT}% hit."}
+    except Exception as _e:
+        return {"approved":False,"reason":f"DB error checking daily risk: {_e}"}
     symbol_u = str(symbol).strip().upper()
     if any(str(p.get("symbol","")).strip().upper() == symbol_u
            for p in get_open_positions()):
@@ -421,10 +456,13 @@ def close_trade(position: dict, price: float,
       5. FULL: write trade_history, THEN close_position_in_db, then journal
     """
     try:
+        if not (0 < partial <= 1.0):
+            return {"success":False,"reason":f"partial={partial} must be > 0 and <= 1"}
+
         entry        = float(position["entry_price"])
         side         = position["side"]
-        current_size = float(position["size"])
-        close_size   = round(current_size * partial, 6)
+        current_size = float(position.get("size",0))
+        close_size   = round(current_size * partial, 8)
 
         if close_size <= 0:
             return {"success":False,"reason":"Nothing to close."}
@@ -468,26 +506,38 @@ def close_trade(position: dict, price: float,
                 "reason":            reason,
                 "timestamp":         datetime.utcnow().isoformat(),
             }
-            ok, new_balance = finalize_partial_close(
-                trade_id    = position.get("trade_id",""),
-                pl          = pl,
-                new_size    = new_size,
-                realized_pl = total_realized,
-                mfe         = position.get("mfe",0),
-                mae         = position.get("mae",0),
-                mfe_r       = position.get("mfe_r",0),
-                mae_r       = position.get("mae_r",0),
-                be_trigger_r= position.get("be_trigger_r",0),
-                journal_event = journal_evt,
-            )
+            # Snapshot current state — restore if DB fails
+            _snap = {
+                "size":           position.get("size"),
+                "realized_pl":    position.get("realized_pl"),
+                "partial_closed": position.get("partial_closed"),
+            }
+            event_id = str(uuid.uuid4())  # unique per attempt — enables retry dedup
+            try:
+                ok, new_balance = finalize_partial_close(
+                    trade_id    = position.get("trade_id",""),
+                    event_id    = event_id,
+                    pl          = pl,
+                    new_size    = new_size,
+                    realized_pl = total_realized,
+                    position    = position,
+                    journal_event = journal_evt,
+                )
+            except Exception as _e:
+                _log(f"CRITICAL: finalize_partial_close failed: {_e}")
+                ok, new_balance = False, 0.0
+
             if not ok:
+                # Restore snapshot — DB did not commit
+                position.update(_snap)
                 _log(f"PARTIAL CLOSE FAILED for #{position.get('trade_id','')} "
-                     f"— position state may be inconsistent")
+                     f"— position state restored to pre-close values")
                 return {"success":False,"reason":"Partial close DB transaction failed"}
-            # Update in-memory position after successful DB commit
+
+            # DB confirmed — now update in-memory state
             position["size"]           = new_size
-            position["partial_closed"] = True
             position["realized_pl"]    = total_realized
+            position["partial_closed"] = True
             return {
                 "success":        True,
                 "partial":        True,
@@ -506,47 +556,53 @@ def close_trade(position: dict, price: float,
 
         # Atomic: balance + trade_history + position close in one transaction
         from database import finalize_trade
-        atomic_ok, new_balance = finalize_trade(
-            trade_id    = position.get("trade_id",""),
-            pl          = total_realized,
-            closed_trade= {
-                "trade_id":           position.get("trade_id",""),
-                "symbol":             position["symbol"],
-                "side":               side,
-                "entry":              entry,
-                "exit":               price,
-                "stop_loss":          position.get("stop_loss",0),
-                "take_profit":        position.get("take_profit",0),
-                "size":               initial_size,
-                "risk":               risk_1r,
-                "risk_1r":            risk_1r,
-                "pl":                 total_realized,
-                "duration":           duration,
-                "exit_reason":        _classify_exit(reason, total_realized, 1.0),
-                "exit_type":          _get_exit_type(reason, total_realized, 1.0),
-                "mfe":                position.get("mfe",0),
-                "mae":                position.get("mae",0),
-                "mfe_r":              position.get("mfe_r",0),
-                "mae_r":              position.get("mae_r",0),
-                "be_trigger_r":       position.get("be_trigger_r",0),
-                "realized_r":         realized_r,
-                "planned_rr":         position.get("planned_rr", position.get("rr",0)),
-                "planned_tp_r":       position.get("planned_tp_r",0),
-                "planned_tp_dollars": position.get("planned_tp_dollars",0),
-                "confidence":         position.get("confidence",0),
-                "mode":               position.get("trade_mode","STRUCTURED"),
-                "session":            position.get("session",""),
-                "trend":              position.get("entry_trend",""),
-                "structure":          position.get("entry_structure",""),
-                "rsi":                position.get("entry_rsi",0),
-                "opened_at":          str(position.get("opened_at","")),
-            }
-        )
+        try:
+            atomic_ok, new_balance = finalize_trade(
+                trade_id     = position.get("trade_id",""),
+                final_leg_pl = pl,        # only the final leg (partials already credited)
+                total_pl     = total_realized,  # cumulative for analytics
+                closed_trade = {
+                    "trade_id":           position.get("trade_id",""),
+                    "symbol":             position["symbol"],
+                    "side":               side,
+                    "entry":              entry,
+                    "exit":               price,
+                    "stop_loss":          position.get("stop_loss",0),
+                    "take_profit":        position.get("take_profit",0),
+                    "size":               initial_size,
+                    "risk":               risk_1r,
+                    "risk_1r":            risk_1r,
+                    "pl":                 total_realized,
+                    "duration":           duration,
+                    "exit_reason":        _classify_exit(reason, total_realized, 1.0),
+                    "exit_type":          _get_exit_type(reason, total_realized, 1.0),
+                    "mfe":                position.get("mfe",0),
+                    "mae":                position.get("mae",0),
+                    "mfe_r":              position.get("mfe_r",0),
+                    "mae_r":              position.get("mae_r",0),
+                    "be_trigger_r":       position.get("be_trigger_r",0),
+                    "realized_r":         realized_r,
+                    "planned_rr":         position.get("planned_rr", position.get("rr",0)),
+                    "planned_tp_r":       position.get("planned_tp_r",0),
+                    "planned_tp_dollars": position.get("planned_tp_dollars",0),
+                    "confidence":         position.get("confidence",0),
+                    "mode":               position.get("trade_mode","STRUCTURED"),
+                    "session":            position.get("session",""),
+                    "trend":              position.get("entry_trend",""),
+                    "structure":          position.get("entry_structure",""),
+                    "rsi":                position.get("entry_rsi",0),
+                    "opened_at":          position.get("opened_at") or None,
+                }
+            )
+        except Exception as _ft_e:
+            _log(f"CRITICAL: finalize_trade raised: {_ft_e} "
+                 f"#{position.get('trade_id','')}")
+            atomic_ok, new_balance = False, 0.0
         if not atomic_ok:
             _log(f"CRITICAL: finalize_trade failed #{position.get('trade_id','')} "
                  f"— position may still appear open")
             return {"success":False,"reason":"DB transaction failed","pl":0,
-                    "new_balance":load_balance(),"duration":duration,"r_multiple":0}
+                    "new_balance":None,"duration":duration,"r_multiple":0}
         # new_balance is from the atomic DB transaction — do NOT call save_balance again
 
         append_trade({
@@ -593,7 +649,7 @@ def close_trade(position: dict, price: float,
 
     except Exception as e:
         _log(f"close_trade error: {e}")
-        return {"success":False,"pl":0,"new_balance":load_balance(),
+        return {"success":False,"pl":0,"new_balance":None,
                 "duration":"","r_multiple":0,"reason":str(e)}
 
 
@@ -648,7 +704,7 @@ def open_trade(symbol: str, decision: dict, analysis: dict,
 
         # Hard cap
         if calc["risk_1r"] > MAX_RISK_USD:
-            calc["size"]    = round(MAX_RISK_USD / sl_d, 6)
+            calc["size"]    = round(MAX_RISK_USD / sl_d, 8)
             calc["risk_1r"] = round(calc["size"] * sl_d, 2)  # recalculate after cap
         calc["expected_profit"] = round(calc["size"] * tp_d, 2)
 
@@ -713,11 +769,13 @@ def open_trade(symbol: str, decision: dict, analysis: dict,
             "sl_moved_at":       None,
         }
 
-        save_position(position)
+        create_position(position)
         # Opening a position does not change balance in paper trading.
         # Balance only changes when positions close (in close_trade).
 
         size_desc = calc.get("size_label","")
+        if not trade_id:
+            return {"success":False,"reason":"Generated trade_id is empty — cannot open."}
         append_trade({
             "action":         "OPEN",
             "trade_id":       trade_id,
@@ -770,6 +828,11 @@ def manage_position(position: dict, price: float,
     Returns True if position was closed.
     """
     try:
+        trade_id = str(position.get("trade_id","")).strip()
+        if not trade_id:
+            _log("manage_position called with empty trade_id — skipping")
+            return False
+
         entry   = float(position["entry_price"])
         sl      = float(position["stop_loss"])
         tp      = float(position["take_profit"])
@@ -780,9 +843,9 @@ def manage_position(position: dict, price: float,
             position.get("risk_amount") or 0
         )
         if risk_1r <= 0:
-            _log(f"Missing risk_1r for #{position.get('trade_id','')} "
-                 f"— refusing to manage position.")
-            return {"status":"ERROR","reason":"Missing risk_1r"}
+            _log(f"Missing risk_1r for #{trade_id} "
+                 f"— refusing to manage (position data corrupt).")
+            return False
 
         # ── Three separate P/L concepts ───────────────────────────────────
         # current_pl   = money at stake on REMAINING position (for SL/TP)
@@ -798,7 +861,7 @@ def manage_position(position: dict, price: float,
             ((price - entry) * initial_size if side=="BUY"
              else (entry - price) * initial_size), 2
         )
-        excursion_r = excursion_pl / risk_1r if risk_1r > 0 else 0.0
+        excursion_r = round(excursion_pl / risk_1r, 4) if risk_1r > 0 else 0.0
 
         # Keep fl as alias for current_pl (used in log messages)
         fl = current_pl
@@ -913,27 +976,53 @@ def manage_position(position: dict, price: float,
         #   +3.0R  → Partial TP 50% + activate trail
         #   +3.0R+ → Let remainder run if structure valid
         # ══════════════════════════════════════════════════════════════
+        if risk_1r <= 0 or not (-10 <= excursion_r < 100):
+            _log(f"Skipping milestones: invalid excursion_r={excursion_r:.3f} "
+                 f"risk_1r={risk_1r:.4f} #{position.get('trade_id','')}")
+            return False
+
 
         # ── Milestone 1: Break-even at +1.25R ────────────────────────────
-        if not position.get("be_moved", False) and excursion_r >= 1.25:
-            new_sl = round(entry + 0.01, 2) if side=="BUY" else round(entry - 0.01, 2)
-            if (side=="BUY" and new_sl > sl) or (side=="SELL" and new_sl < sl):
-                position["stop_loss"] = new_sl
-                position["be_moved"]  = True
-                r_now = round(fl / risk_1r, 2)
+        if not position.get("be_moved", False) and excursion_r >= 1.25:  # +1.25R
+            # Use symbol tick_size — not hardcoded $0.01 which is wrong for BTC/high-price assets
+            tick_size = float(position.get("tick_size", 0.01))
+            be_sl = round(entry + tick_size, 8) if side=="BUY" else round(entry - tick_size, 8)
+            if (side=="BUY" and be_sl > sl) or (side=="SELL" and be_sl < sl):
+                old_sl    = sl
+                # Snapshot before mutation — restore on DB failure
+                _sl_before = sl
+                _be_before = position.get("be_moved", False)
+                _betr_before = position.get("be_trigger_r", 0)
+                position["stop_loss"]    = be_sl
+                position["be_moved"]     = True
                 position["be_trigger_r"] = round(excursion_r, 3)
-                save_position(position)
+                sl = be_sl  # refresh local sl
+                try:
+                    update_position_state(trade_id, {
+                        "stop_loss":    position["stop_loss"],
+                        "be_moved":     True,
+                        "be_trigger_r": position["be_trigger_r"],
+                    })
+                except Exception as _e:
+                    # Restore snapshot — DB did not commit
+                    position["stop_loss"]    = _sl_before
+                    position["be_moved"]     = _be_before
+                    position["be_trigger_r"] = _betr_before
+                    sl = _sl_before
+                    _log(f"CRITICAL: BE state update failed: {_e} "
+                         f"#{position.get('trade_id','')}")
+                    return False
                 append_trade({
                     "action":    "SL_MOVED_BE",
                     "trade_id":  position.get("trade_id",""),
                     "symbol":    position["symbol"],
-                    "new_sl":    new_sl,
+                    "new_sl":    be_sl,
                     "old_sl":    sl,
                     "profit_at": round(excursion_pl, 2),
                     "r_at_move": round(excursion_r, 3),
                     "timestamp": datetime.utcnow().isoformat(),
                 })
-                _log(f"BE @ ${new_sl:,.2f} | +{r_now}R (${fl:.2f}) "
+                _log(f"BE @ ${be_sl:,.2f} | +{excursion_r:.2f}R (${excursion_pl:.2f}) "
                      f"— BREAK-EVEN PROTECTION #{position.get('trade_id','')}")
 
         # ── Milestone 2: Lock +1R at +2R ─────────────────────────────────
@@ -949,7 +1038,16 @@ def manage_position(position: dict, price: float,
                (side=="SELL" and lock_price < cur_sl):
                 position["stop_loss"]    = lock_price
                 position["profit_locked"]= True
-                save_position(position)
+                sl = lock_price  # refresh local sl
+                try:
+                    update_position_state(trade_id, {
+                        "stop_loss":     lock_price,
+                        "profit_locked": True,
+                    })
+                except Exception as _e:
+                    _log(f"CRITICAL: Lock state update failed: {_e} "
+                         f"#{position.get('trade_id','')}")
+                    return False
                 append_trade({
                     "action":     "PROFIT_LOCKED",
                     "trade_id":   position.get("trade_id",""),
@@ -957,24 +1055,34 @@ def manage_position(position: dict, price: float,
                     "new_sl":     lock_price,
                     "old_sl":     cur_sl,
                     "locked_usd": locked_usd,
-                    "profit_at":  round(fl, 2),
-                    "r_at_move":  round(fl / risk_1r, 2),
+                    "profit_at":  round(excursion_pl, 2),
+                    "r_at_move":  round(excursion_r, 2),
                     "timestamp":  datetime.utcnow().isoformat(),
                 })
                 _log(f"1R LOCKED — SL→${lock_price:,.2f} "
                      f"(~${locked_usd:.2f}) #{position.get('trade_id','')}")
 
         # ── Milestone 3: Partial TP at +3R ───────────────────────────────
-        if not position.get("partial_closed", False) and excursion_r >= 3.0:
-            r_now  = round(fl / risk_1r, 1)
-            result = close_trade(position, price,
-                                 f"Partial TP +{r_now}R (${fl:.2f})", partial=0.5)
+        if not position.get("partial_closed", False) and excursion_r >= 3.0:  # +3.0R
+            r_label = round(excursion_r, 1)
+            result  = close_trade(position, price,
+                                  f"Partial TP +{r_label}R (${excursion_pl:.2f})",
+                                  partial=0.5)
             if result.get("success"):
-                _log(f"PARTIAL TP 50% @ ${price:,.2f} (+{r_now}R / +${fl:.2f})")
+                _log(f"PARTIAL TP 50% @ ${price:,.2f} "
+                     f"(+{r_label}R / +${excursion_pl:.2f})")
             # Return False — next scan recalculates with reduced size
-            # Persist MFE/MAE
+            # Persist MFE/MAE after partial close
             if _mfe_changed or _mae_changed:
-                save_position(position)
+                try:
+                    update_position_state(trade_id, {
+                        "mfe":   position.get("mfe",0),
+                        "mae":   position.get("mae",0),
+                        "mfe_r": position.get("mfe_r",0),
+                        "mae_r": position.get("mae_r",0),
+                    })
+                except Exception as _e:
+                    _log(f"MFE/MAE post-partial save failed: {_e}")
             return False
 
         # ── Milestone 4: Trail after +3R ─────────────────────────────────
@@ -986,14 +1094,28 @@ def manage_position(position: dict, price: float,
                 if new_sl > position["stop_loss"]:
                     position["stop_loss"] = new_sl
                     position["trail_sl"]  = True
-                    save_position(position)
+                    sl = new_sl  # refresh local sl
+                    try:
+                        update_position_state(trade_id, {
+                            "stop_loss": new_sl,
+                            "trail_sl":  True,
+                        })
+                    except Exception as _e:
+                        _log(f"Trail SL update failed: {_e}")
                     _log(f"TRAIL SL→${new_sl:,.2f} #{position.get('trade_id','')}")
             else:
                 new_sl = round(price + trail_dist, 2)
                 if new_sl < position["stop_loss"]:
                     position["stop_loss"] = new_sl
                     position["trail_sl"]  = True
-                    save_position(position)
+                    sl = new_sl  # refresh local sl
+                    try:
+                        update_position_state(trade_id, {
+                            "stop_loss": new_sl,
+                            "trail_sl":  True,
+                        })
+                    except Exception as _e:
+                        _log(f"Trail SL update failed: {_e}")
                     _log(f"TRAIL SL→${new_sl:,.2f} #{position.get('trade_id','')}")
 
         # Periodic MFE/MAE persist (every 5 scans to avoid DB overload)
@@ -1001,16 +1123,21 @@ def manage_position(position: dict, price: float,
             _scan_count = position.get("_scan_count", 0) + 1
             position["_scan_count"] = _scan_count
             if _scan_count % 5 == 0:
-                pos_to_save = {k:v for k,v in position.items()
-                               if not k.startswith("_")}
-                save_position(pos_to_save)
+                try:
+                    update_position_state(trade_id, {
+                        "mfe":   position.get("mfe",0),
+                        "mae":   position.get("mae",0),
+                        "mfe_r": position.get("mfe_r",0),
+                        "mae_r": position.get("mae_r",0),
+                    })
+                except Exception as _e:
+                    _log(f"Periodic MFE/MAE save failed: {_e}")
 
         return False
 
     except Exception as e:
         _log(f"manage_position error: {e}")
-        # Return dict so caller can distinguish ERROR from NOT_CLOSED
-        return {"status":"ERROR","reason":str(e)}
+        return False  # bool only — consistent with all other returns
 
 
 # ── Auto trading loop ─────────────────────────────────────────────────────
@@ -1025,16 +1152,18 @@ def _auto_loop():
 
     while _auto_running:
         try:
-            account = None
+            # Load account once per cycle — not once per symbol
             try:
                 from database import get_account
                 account = get_account()
             except Exception as _e:
-                _log(f"Account load error: {_e}")
+                _log(f"Account load error: {_e} — skipping cycle")
+                import time; time.sleep(SCAN_INTERVAL_SECONDS); continue
 
             if not account:
-                _log("CRITICAL: account unavailable — skipping cycle.")
+                _log("CRITICAL: account unavailable — skipping cycle")
                 import time; time.sleep(SCAN_INTERVAL_SECONDS); continue
+
             balance = float(account["balance"])
 
             for symbol in VALID_SYMBOLS:
@@ -1057,19 +1186,19 @@ def _auto_loop():
                         continue
                     for pos in [p for p in open_pos if p["symbol"] == symbol]:
                         try:
-                            result_mp  = manage_position(pos, price,
+                            was_closed = manage_position(pos, price,
                                             analysis.get("atr14",0), analysis)
-                            if result_mp is True:
+                            if was_closed is True:
                                 closed_this_scan = True
-                            elif isinstance(result_mp, dict):
-                                if result_mp.get("status") == "ERROR":
-                                    _log(f"manage ERROR {symbol}: "
-                                         f"{result_mp.get('reason','')}")
                         except Exception as _e:
                             _log(f"manage error {symbol}: {_e}")
 
                     # Reload balance — management may have closed positions
-                    balance = load_balance()
+                    try:
+                        balance = load_balance()
+                    except Exception as _lb_e:
+                        _log(f"DB error reloading balance: {_lb_e} — skipping entry")
+                        continue
 
                     # Prevent same-scan close → immediate re-entry
                     if closed_this_scan:
@@ -1097,7 +1226,11 @@ def _auto_loop():
                          f"RSI {analysis.get('rsi14',0):.1f}")
 
                     if dec in ("BUY","SELL"):
-                        fresh_balance = load_balance()
+                        try:
+                            fresh_balance = load_balance()
+                        except Exception as _lb_e:
+                            _log(f"DB error loading balance before entry: {_lb_e}")
+                            continue
                         result = open_trade(symbol, decision, analysis, fresh_balance)
                         if result.get("success"):
                             balance = fresh_balance
