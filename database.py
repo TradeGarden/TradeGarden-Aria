@@ -660,6 +660,23 @@ def finalize_trade(trade_id: str, final_leg_pl: float,
                 "UPDATE account SET balance=%s, updated_at=NOW() WHERE id=1",
                 (new_balance,))
 
+            # Journal CLOSE inside same transaction (atomic)
+            cur.execute("""
+                INSERT INTO journal(record_id,action,symbol,side,price,pl,reason,data)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (
+                str(uuid.uuid4())[:8],
+                "CLOSE",
+                str(closed_trade.get("symbol","")),
+                str(closed_trade.get("side","")),
+                float(_d0(closed_trade.get("exit",0), PRICE)) or None,
+                float(leg_dec),
+                str(closed_trade.get("exit_reason","")),
+                json.dumps({"trade_id":tid,"total_pl":float(tot_dec),
+                            "realized_r":closed_trade.get("realized_r",0),
+                            "duration":closed_trade.get("duration","")}, default=str),
+            ))
+
         conn.commit()
         return True, float(new_balance)
     except Exception:
