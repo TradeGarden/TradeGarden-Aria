@@ -1,1094 +1,1321 @@
 """
-database.py — Aria source of truth (final production version)
-=============================================================
-Guarantees:
-  1. Partial-close: durable event_id with payload validation
-  2. Full-close: idempotent with payload check, no double credit
-  3. Daily risk: partial_close_events + trade_history.pl (no double-count)
-  4. Protected fields: status/size/realized_pl only via atomic functions
-  5. Decimal throughout — SIZE(8dp), PRICE(5dp), MONEY(2dp), RATIO(4dp)
-  6. One open position per symbol enforced at DB level
-  7. All connections explicitly closed
-  8. Session timezone UTC on every connection
-  9. Migrations atomic — one commit after all pass + verify
- 10. No fake defaults — all read functions raise on DB failure
+executor.py - Stage 4: EXECUTE
+================================
+Handles position opening, management, and closing.
+
+Data model:
+  - One logical trade = one trade_history record (regardless of partials)
+  - realized_pl accumulates partial proceeds in position
+  - initial_size never changes after a partial close
+  - MFE/MAE use initial_size and candle high/low for accuracy
+  - All milestones are R-based (not fixed dollar amounts)
+
+R-Based Milestone System:
+  +1.25R → Break-even (SL to entry)
+  +2.0R  → Lock +1R profit (SL to entry + 1 sl_dist)
+  +3.0R  → Partial TP 50% + activate trail
+  +3.0R+ → Let remainder run if structure valid
+
+Timeout: entry_timeframe stored at open determines hold duration.
 """
 
-import json
 import uuid
-from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
-from datetime import datetime, timezone
+from datetime import datetime
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
-
-from config import DATABASE_URL
-
-# Precision constants matching DB column definitions
-PRICE = Decimal("0.00001")       # NUMERIC(14,5) — prices
-SIZE  = Decimal("0.00000001")    # NUMERIC(16,8) — position sizes
-MONEY = Decimal("0.01")          # NUMERIC(10,2) — P/L, balance
-RATIO = Decimal("0.0001")        # NUMERIC(8,4)  — R multiples, RR
-
-
-def _d(v, places=MONEY) -> Decimal:
-    """Strict Decimal conversion — raises on None, empty, NaN, Infinity."""
-    if v is None or v == "":
-        raise ValueError(f"_d() received {v!r} — refusing to fabricate 0")
-    try:
-        d = Decimal(str(v))
-    except InvalidOperation:
-        raise ValueError(f"_d() cannot convert {v!r} to Decimal")
-    if not d.is_finite():
-        raise ValueError(f"_d() received non-finite value: {v!r}")
-    return d.quantize(places, rounding=ROUND_HALF_UP)
-
-
-def _d0(v, places=MONEY) -> Decimal:
-    """Safe Decimal — returns 0 for None/empty/invalid. For optional fields only."""
-    try:
-        return _d(v, places)
-    except (ValueError, TypeError):
-        return Decimal("0").quantize(places, rounding=ROUND_HALF_UP)
-
-
-def _bool(v) -> bool:
-    """Explicit bool — never misreads string 'false' as True."""
-    if isinstance(v, bool): return v
-    if v is None:           return False
-    if isinstance(v, (int, float, Decimal)): return v != 0
-    s = str(v).strip().lower()
-    if s in ("true","1","yes","y","on"):  return True
-    if s in ("false","0","no","n","off",""):  return False
-    raise ValueError(f"_bool(): cannot parse {v!r} as boolean")
-
-
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def get_conn():
-    """Opens a psycopg2 connection with session timezone = UTC. Caller closes it."""
-    conn = None
-    try:
-        try:
-            conn = psycopg2.connect(DATABASE_URL, sslmode="require",
-                                    connect_timeout=10)
-        except psycopg2.OperationalError:
-            if "localhost" in DATABASE_URL or "127.0.0.1" in DATABASE_URL:
-                conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
-            else:
-                raise
-        with conn.cursor() as cur:
-            cur.execute("SET TIME ZONE 'UTC'")
-        return conn
-    except Exception:
-        if conn is not None:
-            conn.close()
-        raise
-
-
-# ── Schema constants ───────────────────────────────────────────────────────
-
-_REQUIRED_POS_COLS = {
-    "trade_id","symbol","side","entry_price","size","initial_size",
-    "risk_amount","risk_1r","stop_loss","take_profit","rr","sl_dist",
-    "be_moved","profit_locked","trail_sl","partial_closed","partial_seq",
-    "mfe","mae","mfe_r","mae_r","be_trigger_r","realized_pl",
-    "planned_rr","planned_tp_r","planned_tp_dollars",
-    "entry_timeframe","entry_trend","entry_structure","entry_rsi",
-    "confidence","trade_mode","atr_at_open","sl_moved_at","opened_at","status",
-}
-_REQUIRED_HIST_COLS = {
-    "trade_id","symbol","side","entry","exit_price","stop_loss","take_profit",
-    "size","risk","risk_1r","pl","total_pl","new_balance","duration",
-    "exit_reason","exit_type","mfe","mae","mfe_r","mae_r","be_trigger_r",
-    "realized_r","planned_rr","planned_tp_r","planned_tp_dollars",
-    "confidence","session","trend","structure","rsi","trade_mode",
-    "opened_at","closed_at",
-}
-_REQUIRED_PCE_COLS = {
-    "event_id","trade_id","pl","new_size","realized_pl","new_balance","ts",
-}
-
-
-def setup_database():
-    """
-    Create schema, run migrations, verify columns — all in ONE transaction.
-    RAISES on any failure — Aria refuses to start with a bad schema.
-    """
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS account (
-                    id         INTEGER PRIMARY KEY DEFAULT 1 CHECK(id=1),
-                    balance    NUMERIC(14,2) NOT NULL DEFAULT 500.00,
-                    updated_at TIMESTAMPTZ   NOT NULL DEFAULT NOW()
-                )""")
-            cur.execute("SELECT COUNT(*) FROM account WHERE id=1")
-            if cur.fetchone()[0] == 0:
-                cur.execute("INSERT INTO account(id,balance) VALUES(1,500.00)")
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS positions (
-                    id                 BIGSERIAL PRIMARY KEY,
-                    trade_id           TEXT          NOT NULL UNIQUE,
-                    symbol             TEXT          NOT NULL,
-                    side               TEXT          NOT NULL CHECK(side IN('BUY','SELL')),
-                    entry_price        NUMERIC(14,5) NOT NULL,
-                    size               NUMERIC(16,8) NOT NULL,
-                    initial_size       NUMERIC(16,8) NOT NULL DEFAULT 0,
-                    risk_amount        NUMERIC(10,2) NOT NULL DEFAULT 0,
-                    risk_1r            NUMERIC(10,2) NOT NULL DEFAULT 0,
-                    stop_loss          NUMERIC(14,5) NOT NULL,
-                    take_profit        NUMERIC(14,5) NOT NULL,
-                    rr                 NUMERIC(8,4)  NOT NULL DEFAULT 0,
-                    sl_dist            NUMERIC(14,5) NOT NULL DEFAULT 0,
-                    be_moved           BOOLEAN       NOT NULL DEFAULT FALSE,
-                    profit_locked      BOOLEAN       NOT NULL DEFAULT FALSE,
-                    trail_sl           BOOLEAN       NOT NULL DEFAULT FALSE,
-                    partial_closed     BOOLEAN       NOT NULL DEFAULT FALSE,
-                    partial_seq        INTEGER       NOT NULL DEFAULT 0,
-                    mfe                NUMERIC(10,2) NOT NULL DEFAULT 0,
-                    mae                NUMERIC(10,2) NOT NULL DEFAULT 0,
-                    mfe_r              NUMERIC(8,4)  NOT NULL DEFAULT 0,
-                    mae_r              NUMERIC(8,4)  NOT NULL DEFAULT 0,
-                    be_trigger_r       NUMERIC(8,4)  NOT NULL DEFAULT 0,
-                    realized_pl        NUMERIC(10,2) NOT NULL DEFAULT 0,
-                    planned_rr         NUMERIC(8,4)  NOT NULL DEFAULT 0,
-                    planned_tp_r       NUMERIC(8,4)  NOT NULL DEFAULT 0,
-                    planned_tp_dollars NUMERIC(10,2) NOT NULL DEFAULT 0,
-                    entry_timeframe    TEXT          NOT NULL DEFAULT '',
-                    entry_trend        TEXT          NOT NULL DEFAULT '',
-                    entry_structure    TEXT          NOT NULL DEFAULT '',
-                    entry_rsi          NUMERIC(6,2)  NOT NULL DEFAULT 0,
-                    confidence         INTEGER       NOT NULL DEFAULT 0,
-                    trade_mode         TEXT          NOT NULL DEFAULT 'STRUCTURED',
-                    atr_at_open        NUMERIC(14,5) NOT NULL DEFAULT 0,
-                    sl_moved_at        TIMESTAMPTZ,
-                    opened_at          TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-                    status             TEXT          NOT NULL DEFAULT 'OPEN'
-                        CHECK(status IN('OPEN','CLOSED'))
-                )""")
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS trade_history (
-                    id                 BIGSERIAL PRIMARY KEY,
-                    trade_id           TEXT          NOT NULL UNIQUE,
-                    symbol             TEXT          NOT NULL,
-                    side               TEXT          NOT NULL,
-                    entry              NUMERIC(14,5) NOT NULL,
-                    exit_price         NUMERIC(14,5) NOT NULL,
-                    stop_loss          NUMERIC(14,5) NOT NULL DEFAULT 0,
-                    take_profit        NUMERIC(14,5) NOT NULL DEFAULT 0,
-                    size               NUMERIC(16,8) NOT NULL DEFAULT 0,
-                    risk               NUMERIC(10,2) NOT NULL DEFAULT 0,
-                    risk_1r            NUMERIC(10,2) NOT NULL DEFAULT 0,
-                    pl                 NUMERIC(10,2) NOT NULL,
-                    total_pl           NUMERIC(10,2) NOT NULL DEFAULT 0,
-                    new_balance        NUMERIC(14,2) NOT NULL,
-                    duration           TEXT          NOT NULL DEFAULT '',
-                    exit_reason        TEXT          NOT NULL DEFAULT '',
-                    exit_type          TEXT          NOT NULL DEFAULT 'UNKNOWN',
-                    mfe                NUMERIC(10,2) NOT NULL DEFAULT 0,
-                    mae                NUMERIC(10,2) NOT NULL DEFAULT 0,
-                    mfe_r              NUMERIC(8,4)  NOT NULL DEFAULT 0,
-                    mae_r              NUMERIC(8,4)  NOT NULL DEFAULT 0,
-                    be_trigger_r       NUMERIC(8,4)  NOT NULL DEFAULT 0,
-                    realized_r         NUMERIC(8,4)  NOT NULL DEFAULT 0,
-                    planned_rr         NUMERIC(8,4)  NOT NULL DEFAULT 0,
-                    planned_tp_r       NUMERIC(8,4)  NOT NULL DEFAULT 0,
-                    planned_tp_dollars NUMERIC(10,2) NOT NULL DEFAULT 0,
-                    confidence         INTEGER       NOT NULL DEFAULT 0,
-                    session            TEXT          NOT NULL DEFAULT '',
-                    trend              TEXT          NOT NULL DEFAULT '',
-                    structure          TEXT          NOT NULL DEFAULT '',
-                    rsi                NUMERIC(6,2)  NOT NULL DEFAULT 0,
-                    trade_mode         TEXT          NOT NULL DEFAULT 'STRUCTURED',
-                    opened_at          TIMESTAMPTZ,
-                    closed_at          TIMESTAMPTZ   NOT NULL DEFAULT NOW()
-                )""")
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS partial_close_events (
-                    id          BIGSERIAL PRIMARY KEY,
-                    event_id    TEXT          NOT NULL UNIQUE,
-                    trade_id    TEXT          NOT NULL,
-                    pl          NUMERIC(10,2) NOT NULL,
-                    new_size    NUMERIC(16,8) NOT NULL,
-                    realized_pl NUMERIC(10,2) NOT NULL,
-                    new_balance NUMERIC(14,2) NOT NULL,
-                    ts          TIMESTAMPTZ   NOT NULL DEFAULT NOW()
-                )""")
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS journal (
-                    id        BIGSERIAL   PRIMARY KEY,
-                    record_id TEXT        NOT NULL DEFAULT '',
-                    action    TEXT        NOT NULL DEFAULT '',
-                    symbol    TEXT        NOT NULL DEFAULT '',
-                    side      TEXT        NOT NULL DEFAULT '',
-                    price     NUMERIC(14,5),
-                    pl        NUMERIC(10,2),
-                    reason    TEXT        NOT NULL DEFAULT '',
-                    data      TEXT        NOT NULL DEFAULT '{}',
-                    ts        TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )""")
-
-            for stmt in [
-                "CREATE INDEX IF NOT EXISTS idx_pos_status  ON positions(status)",
-                "CREATE INDEX IF NOT EXISTS idx_pos_sym     ON positions(symbol,status)",
-                "CREATE INDEX IF NOT EXISTS idx_hist_closed ON trade_history(closed_at DESC)",
-                "CREATE INDEX IF NOT EXISTS idx_pce_trade   ON partial_close_events(trade_id)",
-                "CREATE INDEX IF NOT EXISTS idx_pce_ts      ON partial_close_events(ts DESC)",
-                "CREATE INDEX IF NOT EXISTS idx_jnl_ts      ON journal(ts DESC)",
-                # Enforce one open position per symbol at DB level
-                """CREATE UNIQUE INDEX IF NOT EXISTS idx_one_open_per_symbol
-                   ON positions(symbol) WHERE status='OPEN'""",
-            ]:
-                cur.execute(stmt)
-
-            _migrate_columns(cur, "positions", [
-                ("initial_size",       "NUMERIC(16,8) NOT NULL DEFAULT 0"),
-                ("risk_1r",            "NUMERIC(10,2) NOT NULL DEFAULT 0"),
-                ("sl_dist",            "NUMERIC(14,5) NOT NULL DEFAULT 0"),
-                ("profit_locked",      "BOOLEAN NOT NULL DEFAULT FALSE"),
-                ("trail_sl",           "BOOLEAN NOT NULL DEFAULT FALSE"),
-                ("partial_seq",        "INTEGER NOT NULL DEFAULT 0"),
-                ("mfe",                "NUMERIC(10,2) NOT NULL DEFAULT 0"),
-                ("mae",                "NUMERIC(10,2) NOT NULL DEFAULT 0"),
-                ("mfe_r",              "NUMERIC(8,4)  NOT NULL DEFAULT 0"),
-                ("mae_r",              "NUMERIC(8,4)  NOT NULL DEFAULT 0"),
-                ("be_trigger_r",       "NUMERIC(8,4)  NOT NULL DEFAULT 0"),
-                ("realized_pl",        "NUMERIC(10,2) NOT NULL DEFAULT 0"),
-                ("planned_rr",         "NUMERIC(8,4)  NOT NULL DEFAULT 0"),
-                ("planned_tp_r",       "NUMERIC(8,4)  NOT NULL DEFAULT 0"),
-                ("planned_tp_dollars", "NUMERIC(10,2) NOT NULL DEFAULT 0"),
-                ("entry_timeframe",    "TEXT NOT NULL DEFAULT ''"),
-                ("entry_trend",        "TEXT NOT NULL DEFAULT ''"),
-                ("entry_structure",    "TEXT NOT NULL DEFAULT ''"),
-                ("entry_rsi",          "NUMERIC(6,2) NOT NULL DEFAULT 0"),
-                ("confidence",         "INTEGER NOT NULL DEFAULT 0"),
-                ("trade_mode",         "TEXT NOT NULL DEFAULT 'STRUCTURED'"),
-                ("atr_at_open",        "NUMERIC(14,5) NOT NULL DEFAULT 0"),
-                ("sl_moved_at",        "TIMESTAMPTZ"),
-            ])
-            _migrate_columns(cur, "trade_history", [
-                ("exit_type",          "TEXT NOT NULL DEFAULT 'UNKNOWN'"),
-                ("risk_1r",            "NUMERIC(10,2) NOT NULL DEFAULT 0"),
-                ("total_pl",           "NUMERIC(10,2) NOT NULL DEFAULT 0"),
-                ("mfe",                "NUMERIC(10,2) NOT NULL DEFAULT 0"),
-                ("mae",                "NUMERIC(10,2) NOT NULL DEFAULT 0"),
-                ("mfe_r",              "NUMERIC(8,4)  NOT NULL DEFAULT 0"),
-                ("mae_r",              "NUMERIC(8,4)  NOT NULL DEFAULT 0"),
-                ("be_trigger_r",       "NUMERIC(8,4)  NOT NULL DEFAULT 0"),
-                ("realized_r",         "NUMERIC(8,4)  NOT NULL DEFAULT 0"),
-                ("planned_rr",         "NUMERIC(8,4)  NOT NULL DEFAULT 0"),
-                ("planned_tp_r",       "NUMERIC(8,4)  NOT NULL DEFAULT 0"),
-                ("planned_tp_dollars", "NUMERIC(10,2) NOT NULL DEFAULT 0"),
-                ("trade_mode",         "TEXT NOT NULL DEFAULT 'STRUCTURED'"),
-            ])
-
-            _verify_columns(cur, "positions",            _REQUIRED_POS_COLS)
-            _verify_columns(cur, "trade_history",        _REQUIRED_HIST_COLS)
-            _verify_columns(cur, "partial_close_events", _REQUIRED_PCE_COLS)
-
-        conn.commit()  # single commit after all migrations + verification
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def _migrate_columns(cur, table: str, columns: list):
-    for col, defn in columns:
-        cur.execute(
-            "SELECT 1 FROM information_schema.columns "
-            "WHERE table_name=%s AND column_name=%s", (table, col))
-        if not cur.fetchone():
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
-            print(f"[DB] migrated {table}.{col}")
-
-
-def _verify_columns(cur, table: str, required: set):
-    cur.execute(
-        "SELECT column_name FROM information_schema.columns WHERE table_name=%s",
-        (table,))
-    existing = {row[0] for row in cur.fetchall()}
-    missing  = required - existing
-    if missing:
-        raise RuntimeError(
-            f"STARTUP ABORTED: '{table}' missing columns: {sorted(missing)}")
-
-
-# ── Account ────────────────────────────────────────────────────────────────
-
-def load_balance() -> Decimal:
-    """RAISES on failure — never fabricates a value."""
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT balance FROM account WHERE id=1")
-            row = cur.fetchone()
-            if row is None: raise RuntimeError("Account row missing.")
-            return _d(row[0], MONEY)
-    finally:
-        conn.close()
-
-
-def get_account() -> dict:
-    """RAISES on failure."""
-    conn = get_conn()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM account WHERE id=1")
-            row = cur.fetchone()
-            if row is None: raise RuntimeError("Account row missing.")
-            d = dict(row)
-            d["balance"] = float(_d(d["balance"], MONEY))
-            return d
-    finally:
-        conn.close()
-
-
-# ── Create position ────────────────────────────────────────────────────────
-
-def create_position(position: dict):
-    """
-    Insert a new OPEN position. RAISES if trade_id empty or already exists.
-    The DB enforces UNIQUE(trade_id) and UNIQUE(symbol) WHERE status='OPEN'.
-    """
-    tid = str(position.get("trade_id","")).strip()
-    if not tid: raise ValueError("create_position: trade_id is empty.")
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO positions (
-                    trade_id, symbol, side, entry_price, size, initial_size,
-                    risk_amount, risk_1r, stop_loss, take_profit, rr, sl_dist,
-                    be_moved, profit_locked, trail_sl, partial_closed, partial_seq,
-                    mfe, mae, mfe_r, mae_r, be_trigger_r, realized_pl,
-                    planned_rr, planned_tp_r, planned_tp_dollars,
-                    entry_timeframe, entry_trend, entry_structure, entry_rsi,
-                    confidence, trade_mode, atr_at_open, sl_moved_at,
-                    opened_at, status
-                ) VALUES (
-                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
-                )
-            """, (
-                tid,
-                str(position["symbol"]),
-                str(position["side"]),
-                _d0(position["entry_price"], PRICE),
-                _d0(position["size"],        SIZE),
-                _d0(position.get("initial_size", position["size"]), SIZE),
-                _d0(position.get("risk_amount",0), MONEY),
-                _d0(position.get("risk_1r",0),     MONEY),
-                _d0(position["stop_loss"],  PRICE),
-                _d0(position["take_profit"],PRICE),
-                _d0(position.get("rr",0),   RATIO),
-                _d0(position.get("sl_dist",0), PRICE),
-                _bool(position.get("be_moved",      False)),
-                _bool(position.get("profit_locked",  False)),
-                _bool(position.get("trail_sl",       False)),
-                _bool(position.get("partial_closed", False)),
-                0,
-                _d0(position.get("mfe",0),  MONEY),
-                _d0(position.get("mae",0),  MONEY),
-                _d0(position.get("mfe_r",0),  RATIO),
-                _d0(position.get("mae_r",0),  RATIO),
-                _d0(position.get("be_trigger_r",0), RATIO),
-                _d0(position.get("realized_pl",0),  MONEY),
-                _d0(position.get("planned_rr",0),   RATIO),
-                _d0(position.get("planned_tp_r",0), RATIO),
-                _d0(position.get("planned_tp_dollars",0), MONEY),
-                str(position.get("entry_timeframe","")),
-                str(position.get("entry_trend","")),
-                str(position.get("entry_structure","")),
-                _d0(position.get("entry_rsi",0), MONEY),
-                int(position.get("confidence",0)),
-                str(position.get("trade_mode","STRUCTURED")),
-                _d0(position.get("atr_at_open",0), PRICE),
-                position.get("sl_moved_at") or None,
-                position.get("opened_at") or _now_utc(),
-                "OPEN",
-            ))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-# ── Update position state (milestone fields only) ─────────────────────────
-
-_PROTECTED    = {"status","size","realized_pl","partial_seq","partial_closed"}
-_MILESTONE_OK = {
-    "stop_loss","take_profit","be_moved","profit_locked","trail_sl",
-    "mfe","mae","mfe_r","mae_r","be_trigger_r","sl_moved_at",
-    "confidence","rr","sl_dist","planned_rr","planned_tp_r",
-    "planned_tp_dollars","entry_timeframe","entry_trend",
-    "entry_structure","entry_rsi","atr_at_open","trade_mode",
-}
-
-
-def update_position_state(trade_id: str, updates: dict):
-    """
-    Update only milestone/management fields on an OPEN position.
-    Rejects protected fields (status, size, realized_pl, partial_seq,
-    partial_closed) — those belong exclusively to atomic close functions.
-    RAISES if trade is not OPEN or field is protected.
-    """
-    tid = str(trade_id).strip()
-    if not tid: raise ValueError("update_position_state: trade_id is empty.")
-
-    bad = {k for k in updates if k in _PROTECTED}
-    if bad:
-        raise ValueError(
-            f"update_position_state: protected fields rejected: {bad}. "
-            f"Use finalize_trade() or finalize_partial_close().")
-
-    filtered = {k:v for k,v in updates.items() if k in _MILESTONE_OK}
-    if not filtered: return
-
-    set_parts, values = [], []
-    for k,v in filtered.items():
-        set_parts.append(f"{k} = %s")
-        if k in ("be_moved","profit_locked","trail_sl"):
-            values.append(_bool(v))
-        elif k == "sl_moved_at":
-            values.append(v if v else None)
-        elif k in ("stop_loss","take_profit","sl_dist","atr_at_open"):
-            values.append(_d0(v, PRICE))
-        elif k in ("mfe","mae","planned_rr","planned_tp_r",
-                   "planned_tp_dollars","entry_rsi"):
-            values.append(_d0(v, MONEY))
-        elif k in ("mfe_r","mae_r","be_trigger_r","rr"):
-            values.append(_d0(v, RATIO))
-        elif k == "confidence":
-            values.append(int(v or 0))
-        else:
-            values.append(str(v or ""))
-
-    values.append(tid)
-    sql = (f"UPDATE positions SET {', '.join(set_parts)} "
-           f"WHERE trade_id=%s AND status='OPEN'")
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, values)
-            if cur.rowcount == 0:
-                raise RuntimeError(
-                    f"update_position_state: {tid} is not OPEN or does not exist.")
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-# ── save_position shim ─────────────────────────────────────────────────────
+from config import (
+    MAX_RISK_USD, RISK_PER_TRADE_PCT, MIN_RISK_REWARD,
+    MIN_CONFIDENCE, MIN_TREND_STRENGTH, MIN_TIMEFRAMES_ALIGNED,
+    RSI_OVERBOUGHT, RSI_OVERSOLD,
+    MAX_TRADES_PER_DAY, MAX_OPEN_POSITIONS, VALID_SYMBOLS,
+    SL_ATR_MULTIPLIER, TP_ATR_MULTIPLIER, TRAIL_ATR_MULT,
+    TIMEOUT_SHORT_HOURS, TIMEOUT_MEDIUM_HOURS, TIMEOUT_LONG_HOURS,
+    MAX_HOLD_DAYS, SCAN_INTERVAL_SECONDS,
+    DAILY_LOSS_LIMIT_PCT, MIN_PLANNED_TP_USD,
+)
+from database import (
+    append_trade,
+    load_balance,
+    get_open_positions,
+    get_open_positions_count,
+    save_position,
+    create_position,
+    update_position_state,
+    finalize_trade,
+    finalize_partial_close,
+    load_closed_trades_today,
+)
 
 def save_position(position: dict):
-    """Backward-compat shim — routes milestone fields to update_position_state().
-    Protected fields silently skipped. Ignores already-closed positions.
     """
-    tid = str(position.get("trade_id","")).strip()
-    if not tid: return
-    safe = {k:v for k,v in position.items() if k in _MILESTONE_OK}
-    if not safe: return
-    try:
-        update_position_state(tid, safe)
-    except RuntimeError as e:
-        if "not OPEN or does not exist" in str(e):
-            pass  # Position closed — safe to ignore in shim
-        else:
-            raise
-    except Exception as e:
-        print(f"[DB] save_position shim error for {tid}: {e}")
-
-def finalize_trade(trade_id: str, final_leg_pl: float,
-                   total_pl: float, closed_trade: dict) -> tuple:
+    Backward-compat shim — routes to update_position_state only.
+    Does NOT fall back to create_position on failure.
     """
-    Atomic full close with payload-validated idempotency.
-
-    Accounting:
-      final_leg_pl → what the REMAINING position earned (credited to balance)
-      total_pl     → cumulative whole-trade P/L (stored in history for analytics)
-      new_balance  = current_balance + final_leg_pl   (partials already credited)
-
-    Idempotency:
-      If history already has this trade_id + position is CLOSED:
-        → validate final_leg_pl and total_pl match stored values (±1 cent)
-        → return stored new_balance
-      If history has trade_id but position is OPEN: raises integrity error.
-
-    RAISES on any failure. Returns (True, float(new_balance)).
-    """
-    tid      = str(trade_id).strip()
-    if not tid: raise ValueError("finalize_trade: trade_id is empty.")
-    leg_dec  = _d(final_leg_pl, MONEY)
-    tot_dec  = _d(total_pl,     MONEY)
-
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT balance FROM account WHERE id=1 FOR UPDATE")
-            acc = cur.fetchone()
-            if acc is None: raise RuntimeError("Account row missing.")
-            new_balance = _d(acc[0], MONEY) + leg_dec
-
-            cur.execute(
-                "SELECT pl, total_pl, new_balance FROM trade_history WHERE trade_id=%s",
-                (tid,))
-            hist = cur.fetchone()
-
-            cur.execute(
-                "SELECT status, realized_pl FROM positions WHERE trade_id=%s FOR UPDATE",
-                (tid,))
-            pos = cur.fetchone()
-
-            if hist is not None:
-                # Idempotent retry — reject orphaned state, validate payload
-                if pos is None:
-                    raise RuntimeError(
-                        f"Integrity error: history has {tid} "
-                        f"but position row is missing.")
-                if pos[0] == "OPEN":
-                    raise RuntimeError(
-                        f"Integrity error: history has {tid} but position is OPEN.")
-                stored_pl      = _d0(hist[0], MONEY)
-                stored_tot     = _d0(hist[1], MONEY)
-                stored_balance = _d0(hist[2], MONEY)
-                if abs(stored_pl  - leg_dec) > MONEY:
-                    raise RuntimeError(
-                        f"finalize_trade retry mismatch for {tid}: "
-                        f"stored final_leg_pl={stored_pl}, supplied={leg_dec}")
-                if abs(stored_tot - tot_dec) > MONEY:
-                    raise RuntimeError(
-                        f"finalize_trade retry mismatch for {tid}: "
-                        f"stored total_pl={stored_tot}, supplied={tot_dec}")
-                return True, float(stored_balance)
-                if pos is None:
-                    raise RuntimeError(
-                        f"Integrity error: history exists for {tid} "
-                        f"but position row is missing.")
-                if pos[0] == "OPEN":
-                    raise RuntimeError(
-                        f"Integrity error: history has {tid} but position is OPEN.")
-                return True, float(stored_balance)
-
-            if pos is None:
-                raise RuntimeError(f"Position {tid} does not exist.")
-            if pos[0] != "OPEN":
-                raise RuntimeError(f"Position {tid} is already {pos[0]}.")
-
-            # Validate accounting invariant
-            prior_realized = _d0(pos[1], MONEY)
-            expected_total = prior_realized + leg_dec
-            if abs(tot_dec - expected_total) > MONEY:
-                raise RuntimeError(
-                    f"Accounting invariant violated for {tid}: "
-                    f"prior_realized({prior_realized}) + final_leg({leg_dec}) "
-                    f"= {expected_total} ≠ supplied total_pl({tot_dec})")
-
-            cur.execute("""
-                INSERT INTO trade_history (
-                    trade_id, symbol, side, entry, exit_price,
-                    stop_loss, take_profit, size, risk, risk_1r,
-                    pl, total_pl, new_balance, duration,
-                    exit_reason, exit_type, mfe, mae, mfe_r, mae_r,
-                    be_trigger_r, realized_r, planned_rr, planned_tp_r,
-                    planned_tp_dollars, confidence, session, trend,
-                    structure, rsi, trade_mode, opened_at, closed_at
-                ) VALUES (
-                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                    %s,%s,NOW()
-                )
-            """, (
-                tid,
-                str(closed_trade.get("symbol","")),
-                str(closed_trade.get("side","")),
-                _d0(closed_trade.get("entry",0),        PRICE),
-                _d0(closed_trade.get("exit",0),         PRICE),
-                _d0(closed_trade.get("stop_loss",0),    PRICE),
-                _d0(closed_trade.get("take_profit",0),  PRICE),
-                _d0(closed_trade.get("size",0),         SIZE),
-                _d0(closed_trade.get("risk",0),         MONEY),
-                _d0(closed_trade.get("risk_1r",0),      MONEY),
-                leg_dec,
-                tot_dec,
-                new_balance,
-                str(closed_trade.get("duration","")),
-                str(closed_trade.get("exit_reason","")),
-                str(closed_trade.get("exit_type","UNKNOWN")),
-                _d0(closed_trade.get("mfe",0),          MONEY),
-                _d0(closed_trade.get("mae",0),          MONEY),
-                _d0(closed_trade.get("mfe_r",0),        RATIO),
-                _d0(closed_trade.get("mae_r",0),        RATIO),
-                _d0(closed_trade.get("be_trigger_r",0), RATIO),
-                _d0(closed_trade.get("realized_r",0),   RATIO),
-                _d0(closed_trade.get("planned_rr",0),   RATIO),
-                _d0(closed_trade.get("planned_tp_r",0), RATIO),
-                _d0(closed_trade.get("planned_tp_dollars",0), MONEY),
-                int(closed_trade.get("confidence",0)),
-                str(closed_trade.get("session","")),
-                str(closed_trade.get("trend","")),
-                str(closed_trade.get("structure","")),
-                _d0(closed_trade.get("rsi",0),          MONEY),
-                str(closed_trade.get("mode","STRUCTURED")),
-                closed_trade.get("opened_at") or None,
-            ))
-
-            cur.execute(
-                "UPDATE positions SET status='CLOSED' "
-                "WHERE trade_id=%s AND status='OPEN'", (tid,))
-            if cur.rowcount != 1:
-                raise RuntimeError(f"Failed to mark {tid} CLOSED.")
-
-            cur.execute(
-                "UPDATE account SET balance=%s, updated_at=NOW() WHERE id=1",
-                (new_balance,))
-
-            # Journal CLOSE inside same transaction (atomic)
-            cur.execute("""
-                INSERT INTO journal(record_id,action,symbol,side,price,pl,reason,data)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
-            """, (
-                str(uuid.uuid4())[:8],
-                "CLOSE",
-                str(closed_trade.get("symbol","")),
-                str(closed_trade.get("side","")),
-                float(_d0(closed_trade.get("exit",0), PRICE)) or None,
-                float(leg_dec),
-                str(closed_trade.get("exit_reason","")),
-                json.dumps({"trade_id":tid,"total_pl":float(tot_dec),
-                            "realized_r":closed_trade.get("realized_r",0),
-                            "duration":closed_trade.get("duration","")}, default=str),
-            ))
-
-        conn.commit()
-        return True, float(new_balance)
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-# ── Atomic: finalize_partial_close ────────────────────────────────────────
-
-def finalize_partial_close(trade_id: str, event_id: str,
-                           pl: float, new_size: float,
-                           realized_pl: float, position: dict,
-                           journal_event: dict = None) -> tuple:
-    """
-    Atomic partial close with durable deduplication + payload validation.
-
-    event_id must be generated once by the caller and reused on retry.
-    On retry: validates that the stored event matches trade_id, pl, new_size,
-    realized_pl — rejects mismatches instead of silently accepting them.
-
-    Returns (True, float(new_balance)). RAISES on failure.
-    """
-    tid = str(trade_id).strip()
-    eid = str(event_id).strip()
-    if not tid: raise ValueError("finalize_partial_close: trade_id is empty.")
-    if not eid: raise ValueError("finalize_partial_close: event_id is empty.")
-
-    pl_dec       = _d(pl,          MONEY)
-    new_size_dec = _d(new_size,    SIZE)
-    realized_dec = _d(realized_pl, MONEY)
-
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            # Check deduplication with payload validation
-            cur.execute(
-                "SELECT trade_id, pl, new_size, realized_pl, new_balance "
-                "FROM partial_close_events WHERE event_id=%s",
-                (eid,))
-            dup = cur.fetchone()
-            if dup is not None:
-                if dup[0] != tid:
-                    raise RuntimeError(
-                        f"Partial event {eid} belongs to trade {dup[0]}, "
-                        f"not {tid}.")
-                if abs(_d0(dup[1], MONEY) - pl_dec) > MONEY:
-                    raise RuntimeError(
-                        f"Partial event {eid} pl mismatch: "
-                        f"stored={dup[1]}, supplied={pl_dec}")
-                if abs(_d0(dup[2], SIZE) - new_size_dec) > SIZE:
-                    raise RuntimeError(
-                        f"Partial event {eid} new_size mismatch: "
-                        f"stored={dup[2]}, supplied={new_size_dec}")
-                if abs(_d0(dup[3], MONEY) - realized_dec) > MONEY:
-                    raise RuntimeError(
-                        f"Partial event {eid} realized_pl mismatch: "
-                        f"stored={dup[3]}, supplied={realized_dec}")
-                if abs(_d0(dup[3], MONEY) - realized_dec) > MONEY:
-                    raise RuntimeError(
-                        f"Partial event {eid} realized_pl mismatch: "
-                        f"stored={dup[3]}, supplied={realized_dec}")
-                if abs(_d0(dup[3], MONEY) - realized_dec) > MONEY:
-                    raise RuntimeError(
-                        f"Partial event {eid} realized_pl mismatch: "
-                        f"stored={dup[3]}, supplied={realized_dec}")
-                return True, float(_d0(dup[4], MONEY))
-
-            cur.execute("SELECT balance FROM account WHERE id=1 FOR UPDATE")
-            acc = cur.fetchone()
-            if acc is None: raise RuntimeError("Account row missing.")
-            new_balance = _d(acc[0], MONEY) + pl_dec
-
-            cur.execute(
-                "SELECT status, size, realized_pl FROM positions "
-                "WHERE trade_id=%s FOR UPDATE", (tid,))
-            pos = cur.fetchone()
-            if pos is None:
-                raise RuntimeError(f"Position {tid} not found.")
-            if pos[0] != "OPEN":
-                raise RuntimeError(f"Position {tid} is {pos[0]}.")
-
-            # Validate size transition
-            old_size_dec      = _d0(pos[1], SIZE)
-            old_realized      = _d0(pos[2], MONEY)
-            expected_realized = old_realized + pl_dec
-
-            if new_size_dec >= old_size_dec or new_size_dec < Decimal("0"):
-                raise RuntimeError(
-                    f"Invalid size transition for {tid}: "
-                    f"old={old_size_dec}, new={new_size_dec}")
-            if abs(realized_dec - expected_realized) > MONEY:
-                raise RuntimeError(
-                    f"realized_pl mismatch for {tid}: "
-                    f"old({old_realized}) + pl({pl_dec}) "
-                    f"= {expected_realized} ≠ supplied({realized_dec})")
-
-            # Insert deduplication record
-            cur.execute("""
-                INSERT INTO partial_close_events
-                    (event_id, trade_id, pl, new_size, realized_pl, new_balance)
-                VALUES (%s,%s,%s,%s,%s,%s)
-            """, (eid, tid, pl_dec, new_size_dec, realized_dec, new_balance))
-
-            # Update position
-            cur.execute("""
-                UPDATE positions SET
-                    size           = %s,
-                    realized_pl    = %s,
-                    partial_closed = TRUE,
-                    partial_seq    = partial_seq + 1,
-                    stop_loss      = %s,
-                    take_profit    = %s,
-                    be_moved       = %s,
-                    profit_locked  = %s,
-                    trail_sl       = %s,
-                    sl_moved_at    = %s,
-                    mfe            = %s, mae   = %s,
-                    mfe_r          = %s, mae_r = %s,
-                    be_trigger_r   = %s
-                WHERE trade_id=%s AND status='OPEN'
-            """, (
-                new_size_dec, realized_dec,
-                _d0(position.get("stop_loss",0),  PRICE),
-                _d0(position.get("take_profit",0), PRICE),
-                _bool(position.get("be_moved",     False)),
-                _bool(position.get("profit_locked", False)),
-                _bool(position.get("trail_sl",      False)),
-                position.get("sl_moved_at") or None,
-                _d0(position.get("mfe",0),  MONEY),
-                _d0(position.get("mae",0),  MONEY),
-                _d0(position.get("mfe_r",0),RATIO),
-                _d0(position.get("mae_r",0),RATIO),
-                _d0(position.get("be_trigger_r",0), RATIO),
-                tid,
-            ))
-            if cur.rowcount != 1:
-                raise RuntimeError(f"Position UPDATE matched 0 rows for {tid}.")
-
-            cur.execute(
-                "UPDATE account SET balance=%s, updated_at=NOW() WHERE id=1",
-                (new_balance,))
-
-            evt = journal_event or {}
-            cur.execute("""
-                INSERT INTO journal(record_id,action,symbol,side,price,pl,reason,data)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
-            """, (
-                str(uuid.uuid4())[:8],
-                str(evt.get("action","PARTIAL_TP")),
-                str(evt.get("symbol","")),
-                str(evt.get("side","")),
-                _d0(evt.get("exit",0), PRICE) or None,
-                pl_dec,
-                str(evt.get("reason","")),
-                json.dumps(evt, default=str),
-            ))
-
-        conn.commit()
-        return True, float(new_balance)
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-# ── Read positions ─────────────────────────────────────────────────────────
-
-def _cast_pos(d: dict) -> dict:
-    """Cast with field-specific precision — never collapse sizes/prices to 2dp."""
-    for f in ("entry_price","stop_loss","take_profit","sl_dist","atr_at_open"):
-        d[f] = float(_d0(d.get(f,0), PRICE))
-    for f in ("size","initial_size"):
-        d[f] = float(_d0(d.get(f,0), SIZE))
-    for f in ("risk_amount","risk_1r","mfe","mae","realized_pl",
-              "planned_tp_dollars","entry_rsi"):
-        d[f] = float(_d0(d.get(f,0), MONEY))
-    for f in ("rr","mfe_r","mae_r","be_trigger_r","planned_rr","planned_tp_r"):
-        d[f] = float(_d0(d.get(f,0), RATIO))
-    d["confidence"]     = int(d.get("confidence")  or 0)
-    d["partial_seq"]    = int(d.get("partial_seq") or 0)
-    for f in ("be_moved","profit_locked","trail_sl","partial_closed"):
-        d[f] = _bool(d.get(f, False))
-    d["trade_mode"] = str(d.get("trade_mode","STRUCTURED"))
-    d["mode"]       = d["trade_mode"]
-    d["trailing"]   = d["trail_sl"]
-    for ts in ("sl_moved_at","opened_at"):
-        if d.get(ts) and not isinstance(d[ts], str):
-            d[ts] = d[ts].isoformat()
-    return d
-
-
-def get_open_positions() -> list:
-    """RAISES on DB error — never returns silent []."""
-    conn = get_conn()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT * FROM positions WHERE status='OPEN' ORDER BY opened_at ASC")
-            return [_cast_pos(dict(r)) for r in cur.fetchall()]
-    finally:
-        conn.close()
-
-
-def get_open_positions_count() -> int:
-    """RAISES on DB error — never returns silent 0."""
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM positions WHERE status='OPEN'")
-            return int(cur.fetchone()[0])
-    finally:
-        conn.close()
-
-
-def load_position(trade_id: str) -> dict:
-    """RAISES if not found or DB error."""
-    tid = str(trade_id).strip()
-    if not tid: raise ValueError("load_position: trade_id is empty.")
-    conn = get_conn()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM positions WHERE trade_id=%s", (tid,))
-            row = cur.fetchone()
-            if row is None: raise RuntimeError(f"Position {tid} not found.")
-            return _cast_pos(dict(row))
-    finally:
-        conn.close()
-
-
-# ── Journal ────────────────────────────────────────────────────────────────
-
-def append_trade(event: dict):
-    """Non-critical — logs warning but does not raise."""
-    try:
-        price_v = event.get("exit_price", event.get("entry_price",
-                  event.get("exit", event.get("entry"))))
-        pl_v    = event.get("pl")
-        conn = get_conn()
+    tid = (position.get("trade_id") or "").strip()
+    if not tid:
+        return
+    safe = {k:v for k,v in position.items()
+            if k not in {"status","size","realized_pl","partial_seq","partial_closed"}}
+    if safe:
         try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO journal(record_id,action,symbol,side,price,pl,reason,data)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
-                """, (
-                    str(uuid.uuid4())[:8],
-                    str(event.get("action","")),
-                    str(event.get("symbol","")),
-                    str(event.get("side","")),
-                    _d0(price_v, PRICE) if price_v is not None else None,
-                    _d0(pl_v,    MONEY) if pl_v    is not None else None,
-                    str(event.get("exit_reason", event.get("reason",""))),
-                    json.dumps(event, default=str),
-                ))
-            conn.commit()
-        finally:
-            conn.close()
-    except Exception as e:
-        print(f"[DB] append_trade warning (non-critical): {e}")
+            update_position_state(tid, safe)
+        except RuntimeError as e:
+            if "not OPEN or does not exist" not in str(e):
+                raise
+        except Exception as e:
+            print(f"[EXEC] save_position error for {tid}: {e}")
 
 
-def load_journal() -> list:
-    conn = get_conn()
+import threading
+_auto_thread  = None
+_auto_running = False
+
+
+def _log(msg: str):
+    ts = datetime.utcnow().strftime("%H:%M:%S")
+    print(f"[ARIA {ts}] {msg}")
+
+
+# ── Candle strength ────────────────────────────────────────────────────────
+
+def candle_strength(candles: list, ema20: float) -> int:
+    """Candle/price-action strength only. Volume counted separately."""
+    if len(candles) < 2:
+        return 0
+    c    = candles[-1]
+    body = abs(c["close"] - c["open"])
+    rng  = c["high"] - c["low"]
+    if rng == 0:
+        return 0
+    body_pct = body / rng
+    score    = 0
+    if body_pct > 0.6:
+        score += 10
+    elif body_pct > 0.4:
+        score += 5
+    # Close direction vs EMA
+    if ema20:
+        if c["close"] > c["open"] and c["close"] > ema20:
+            score += 5
+        elif c["close"] < c["open"] and c["close"] < ema20:
+            score += 5
+    return min(score, 20)
+
+
+# ── Confidence scoring ────────────────────────────────────────────────────
+
+def compute_confidence(analysis: dict, decision: str) -> dict:
+    """
+    Confidence breakdown (max 100).
+    Each category scored independently — volume not double-counted.
+    """
+    ms     = analysis.get("ms",  {})
+    e20    = analysis.get("ema20",  0) or 0
+    e50    = analysis.get("ema50",  0) or 0
+    r      = analysis.get("rsi14",  50)
+    vol    = analysis.get("vol",    {})
+    frames = analysis.get("frames", [])
+    atr    = analysis.get("atr14",  0) or 0
+    candles= analysis.get("candles",[])
+
+    d      = decision if decision in ("BUY","SELL") else "BUY"
+    is_buy = d == "BUY"
+
+    scores = {
+        "Market Structure": 0,
+        "EMA Alignment":    0,
+        "RSI":              0,
+        "Candle Strength":  0,
+        "Volume":           0,
+    }
+
+    # 1. Market structure (max 25)
+    trend  = ms.get("trend","")
+    bos    = ms.get("bos", False)
+    disp   = ms.get("displacement", 0)
+    sp     = ms.get("strength_pct", 0)
+    if (is_buy and trend=="Bullish") or (not is_buy and trend=="Bearish"):
+        scores["Market Structure"] = 15
+        if sp >= 50: scores["Market Structure"] += 5
+        if bos:      scores["Market Structure"] += 3
+        if disp >= 0.8: scores["Market Structure"] += 2
+
+    # 2. EMA alignment (max 25)
+    slope = analysis.get("ema20_slope", {})
+    if e20 and e50:
+        if (is_buy and e20 > e50) or (not is_buy and e20 < e50):
+            scores["EMA Alignment"] = 15
+            sd = slope.get("direction","")
+            if is_buy  and sd in ("RISING","RISING_STRONG"):  scores["EMA Alignment"] += 10
+            elif not is_buy and sd in ("FALLING","FALLING_STRONG"): scores["EMA Alignment"] += 10
+
+    # 3. RSI (max 15)
+    if is_buy:
+        if 40 < r < 65:   scores["RSI"] = 15
+        elif r <= 40:      scores["RSI"] = 12
+        elif 65 <= r < 75: scores["RSI"] = 6
+    else:
+        if 35 < r < 60:   scores["RSI"] = 15
+        elif r >= 60:      scores["RSI"] = 12
+        elif 25 <= r < 35: scores["RSI"] = 6
+
+    # 4. Candle strength (max 20) — price action only, no volume
+    scores["Candle Strength"] = candle_strength(candles, e20)
+
+    # 5. Volume (max 15) — counted once here only
+    bp  = vol.get("buy_pressure",  50)
+    sp2 = vol.get("sell_pressure", 50)
+    rel = vol.get("relative", 1.0)
+    if is_buy:
+        if bp > 60 and rel > 1.2: scores["Volume"] = 15
+        elif bp > 50:             scores["Volume"] = 8
+        else:                     scores["Volume"] = 2
+    else:
+        if sp2 > 60 and rel > 1.2: scores["Volume"] = 15
+        elif sp2 > 50:             scores["Volume"] = 8
+        else:                      scores["Volume"] = 2
+
+    total = min(sum(scores.values()), 100)
+    return {"breakdown": scores, "total": total}
+
+
+# ── Position sizing ───────────────────────────────────────────────────────
+
+def calc_position(balance: float, price: float, atr: float,
+                  side: str, confidence: int) -> dict:
+    """
+    Calculate position size from risk budget and ATR stop distance.
+    All four values (sl_dist, size, risk_1r, expected_profit) are
+    internally consistent.
+    """
+    # Confidence multiplier
+    if confidence >= 85:  mult = 1.0
+    elif confidence >= 78: mult = 0.8
+    elif confidence >= 70: mult = 0.6
+    else:                  mult = 0.4
+
+    pct_risk = round(balance * RISK_PER_TRADE_PCT / 100, 2)
+    risk_1r  = round(min(MAX_RISK_USD, pct_risk) * mult, 2)
+    risk_1r  = min(MAX_RISK_USD, max(risk_1r, 0.30))
+
+    sl_dist  = atr * SL_ATR_MULTIPLIER
+    min_dist = price * 0.001
+    if sl_dist < min_dist:
+        sl_dist = min_dist
+
+    tp_dist  = atr * TP_ATR_MULTIPLIER
+
+    if side == "BUY":
+        sl = round(price - sl_dist, 2)
+        tp = round(price + tp_dist, 2)
+    else:
+        sl = round(price + sl_dist, 2)
+        tp = round(price - tp_dist, 2)
+
+    rr   = round(tp_dist / sl_dist, 2)
+    size = round(risk_1r / sl_dist, 8)
+    expected = round(size * tp_dist, 2)
+
+    return {
+        "risk_1r":         risk_1r,
+        "size":            size,
+        "stop_loss":       sl,
+        "take_profit":     tp,
+        "sl_dist":         sl_dist,
+        "tp_dist":         tp_dist,
+        "rr":              rr,
+        "expected_profit": expected,
+        "size_label":      f"Conf {confidence}% → ${risk_1r:.2f} risk | TP ~${expected:.2f}",
+    }
+
+
+# ── Exit classification ───────────────────────────────────────────────────
+
+def _get_exit_type(reason: str, pl: float, partial: float) -> str:
+    """
+    Normalized exit type. Uses reason string — NOT P/L thresholds.
+    P/L thresholds are unreliable (e.g. a manual close at $0.60).
+    """
+    if partial < 1.0:
+        return "PARTIAL_TP"
+    r = reason.lower()
+    if "take profit"  in r: return "TP"
+    # Order matters — most specific first
+    if "trailing stop" in r or "trail stop" in r: return "PROFIT_LOCK"
+    if "profit lock"   in r or "profit locked" in r: return "PROFIT_LOCK"
+    if "break-even stop" in r or "breakeven stop" in r: return "BREAK_EVEN"
+    if "stop loss"     in r:  return "ACTUAL_SL"
+    if "timeout"       in r:  return "TIMEOUT"
+    if "structure"     in r:  return "STRUCTURE"
+    if "manual"        in r:  return "MANUAL"
+    if "partial tp"    in r or "partial take" in r: return "PARTIAL_TP"
+    return "UNKNOWN"
+
+
+def _classify_exit(reason: str, pl: float, partial: float) -> str:
+    """Human-readable exit description based on reason, not P/L thresholds."""
+    et = _get_exit_type(reason, pl, partial)
+    if et == "PARTIAL_TP":   return f"Partial TP (${pl:+.2f})"
+    if et == "TP":           return f"Take Profit (${pl:+.2f})"
+    if et == "ACTUAL_SL":    return f"Actual Loss (${pl:+.2f})"
+    if et == "TIMEOUT":      return f"Timeout (${pl:+.2f})"
+    if et == "STRUCTURE":    return f"Structure exit (${pl:+.2f})"
+    if et == "MANUAL":       return f"Manual close (${pl:+.2f})"
+    if et == "PROFIT_LOCK":  return f"Profit-lock exit (${pl:+.2f})"
+    if et == "BREAK_EVEN":   return f"Break-Even exit (${pl:+.2f})"
+    return reason
+
+
+# ── Timeout ───────────────────────────────────────────────────────────────
+
+def get_timeout_hours(position: dict) -> float:
+    """Entry timeframe determines hold duration.
+    15M        → SHORT
+    1H         → MEDIUM
+    4H / Daily → LONG
+    """
+    tf = str(position.get("entry_timeframe","")).strip().upper()
+    if tf == "15M":              return TIMEOUT_SHORT_HOURS
+    if tf == "1H":               return TIMEOUT_MEDIUM_HOURS
+    if tf in ("4H","1D","DAILY"):return TIMEOUT_LONG_HOURS
+    return TIMEOUT_MEDIUM_HOURS
+
+
+# ── Daily loss check ──────────────────────────────────────────────────────
+
+def todays_trade_count() -> int:
+    """
+    Count positions ENTERED today (open + closed).
+    RAISES on DB failure — caller blocks trading.
+    """
+    today = datetime.utcnow().date().isoformat()
+    # Raises on DB error — no silent fallback
+    open_today = sum(
+        1 for p in get_open_positions()
+        if str(p.get("opened_at","")).startswith(today)
+    )
+    closed_today = len(load_closed_trades_today())
+    return open_today + closed_today
+
+
+def todays_loss_pct(balance: float) -> float:
+    """
+    Calculate total realized loss today as % of balance.
+    RAISES if DB unavailable — caller must block trading on failure.
+    """
+    trades = load_closed_trades_today()  # raises on DB error
+    # Sum pl (not total_pl) from all events today:
+    # partial_close_events.pl = partial leg P/L
+    # trade_history.pl        = final leg P/L
+    # Together they represent actual realized balance movements without double-counting
+    losses = sum(
+        float(t.get("pl",0))
+        for t in trades
+        if float(t.get("pl",0)) < 0
+    )
+    return round(abs(losses) / balance * 100, 2) if balance > 0 else 0.0
+
+
+# ── Structure validity ────────────────────────────────────────────────────
+
+def structure_still_valid(position: dict, analysis: dict) -> bool:
+    """
+    Returns False if original trade thesis is broken.
+    Uses CHoCH + sequence — not EMA (too laggy).
+    """
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM journal ORDER BY ts DESC LIMIT 500")
-            result = []
-            for r in cur.fetchall():
-                d = dict(r)
+        side  = position["side"]
+        ms    = analysis.get("ms", {})
+        trend = ms.get("trend","Neutral")
+        choch = ms.get("choch", False)
+        seq   = ms.get("sequence","")
+
+        if choch:
+            return False
+        if side == "BUY"  and trend == "Bearish": return False
+        if side == "SELL" and trend == "Bullish": return False
+
+        parts = [p.strip() for p in seq.split("→")] if seq else []
+        if len(parts) >= 2:
+            last = parts[-1]
+            if side == "BUY"  and last == "LL": return False
+            if side == "SELL" and last == "HH": return False
+
+        r = analysis.get("rsi14", 50)
+        if side == "BUY"  and r > 85: return False
+        if side == "SELL" and r < 15: return False
+
+        return True
+    except Exception as _e:
+        _log(f"Structure validation error: {_e} — failing closed for safety")
+        return False  # fail-closed: unknown state = exit to protect capital
+
+
+# ── Check rules ───────────────────────────────────────────────────────────
+
+def check_rules(symbol: str, side: str, analysis: dict,
+                confidence: int, rr: float, balance: float,
+                expected_profit: float = 0.0) -> dict:
+    """Gate checks before any trade is opened."""
+    ms     = analysis.get("ms",     {})
+    regime = analysis.get("regime", {})
+    price  = analysis.get("price",  0)
+    atr    = analysis.get("atr14",  0)
+
+    # Hard limits
+    try:
+        if get_open_positions_count() >= MAX_OPEN_POSITIONS:
+            return {"approved":False,"reason":f"Max {MAX_OPEN_POSITIONS} positions open."}
+    except Exception as _e:
+        return {"approved":False,"reason":f"DB error checking positions: {_e}"}
+    try:
+        if todays_trade_count() >= MAX_TRADES_PER_DAY:
+            return {"approved":False,"reason":f"Daily ceiling of {MAX_TRADES_PER_DAY} trades reached."}
+        if todays_loss_pct(balance) >= DAILY_LOSS_LIMIT_PCT:
+            return {"approved":False,"reason":f"Daily loss limit {DAILY_LOSS_LIMIT_PCT}% hit."}
+    except Exception as _e:
+        return {"approved":False,"reason":f"DB error checking daily risk: {_e}"}
+    symbol_u = str(symbol).strip().upper()
+    if any(str(p.get("symbol","")).strip().upper() == symbol_u
+           for p in get_open_positions()):
+        return {"approved":False,"reason":f"{symbol} already open."}
+
+    # Input validation
+    if symbol not in VALID_SYMBOLS:
+        return {"approved":False,"reason":f"Invalid symbol: {symbol}"}
+    if side not in ("BUY","SELL"):
+        return {"approved":False,"reason":f"Invalid side: {side}"}
+    if price <= 0 or atr <= 0:
+        return {"approved":False,"reason":"Invalid price or ATR."}
+
+    # Ranging market
+    if regime.get("regime") == "RANGING":
+        return {"approved":False,"reason":"Market RANGING — no trend-following entries."}
+
+    # Structure
+    trend    = ms.get("trend","")
+    strength = ms.get("strength_pct",0)
+    sw_low   = ms.get("swing_low",0)
+    sw_high  = ms.get("swing_high",0)
+
+    if side=="BUY"  and trend!="Bullish":
+        return {"approved":False,"reason":f"Structure is {trend}. Need Bullish to BUY."}
+    if side=="SELL" and trend!="Bearish":
+        return {"approved":False,"reason":f"Structure is {trend}. Need Bearish to SELL."}
+    if strength < MIN_TREND_STRENGTH:
+        return {"approved":False,"reason":f"Trend strength {strength}% below {MIN_TREND_STRENGTH}%."}
+
+    # Anti-chase
+    if atr > 0 and price > 0:
+        if side=="BUY"  and sw_low  > 0 and (price-sw_low)/atr  > 4.5:
+            return {"approved":False,"reason":f"Chasing — price {(price-sw_low)/atr:.1f} ATR above swing low."}
+        if side=="SELL" and sw_high > 0 and (sw_high-price)/atr > 4.5:
+            return {"approved":False,"reason":f"Chasing — price {(sw_high-price)/atr:.1f} ATR below swing high."}
+
+    # R:R
+    if rr < MIN_RISK_REWARD:
+        return {"approved":False,"reason":f"R:R 1:{rr} below minimum 1:{MIN_RISK_REWARD}."}
+
+    # Minimum planned TP opportunity
+    if MIN_PLANNED_TP_USD > 0 and expected_profit < MIN_PLANNED_TP_USD:
+        return {"approved":False,
+                "reason":f"Planned TP ${expected_profit:.2f} below "
+                         f"minimum ${MIN_PLANNED_TP_USD:.2f}."}
+
+    # Confidence
+    if confidence < MIN_CONFIDENCE:
+        return {"approved":False,"reason":f"Confidence {confidence}% below {MIN_CONFIDENCE}%."}
+
+    # Timeframes
+    frames   = analysis.get("frames",[])
+    tf_total = len(frames)
+    tf_ok    = sum(1 for f in frames if f.get("decision")==side)
+    if tf_ok < MIN_TIMEFRAMES_ALIGNED:
+        return {"approved":False,
+                "reason":f"Only {tf_ok}/{tf_total} timeframes agree on {side}. "
+                         f"Need {MIN_TIMEFRAMES_ALIGNED}+."}
+
+    # CHoCH
+    if ms.get("choch"):
+        return {"approved":False,"reason":"CHoCH detected — structure reversing."}
+
+    # Sequence validation
+    seq   = ms.get("sequence","")
+    parts = [p.strip() for p in seq.split("→")] if seq else []
+    if parts:
+        last = parts[-1]
+        if side=="BUY"  and last=="LL": return {"approved":False,"reason":f"Last swing LL breaks bullish structure."}
+        if side=="SELL" and last=="HH": return {"approved":False,"reason":f"Last swing HH breaks bearish structure."}
+
+    return {"approved":True,"reason":"All conditions met."}
+
+
+# ── Close trade (FIXED ordering) ──────────────────────────────────────────
+
+def close_trade(position: dict, price: float,
+                reason: str = "Manual", partial: float = 1.0) -> dict:
+    """
+    FIXED close flow:
+      1. Calculate P/L for this execution
+      2. Accumulate realized_pl in position
+      3. Save balance exactly once
+      4. PARTIAL: update position, journal entry, return
+      5. FULL: write trade_history, THEN close_position_in_db, then journal
+    """
+    try:
+        if not (0 < partial <= 1.0):
+            return {"success":False,"reason":f"partial={partial} must be > 0 and <= 1"}
+
+        entry        = float(position["entry_price"])
+        side         = position["side"]
+        current_size = float(position.get("size",0))
+        close_size   = round(current_size * partial, 8)
+
+        if close_size <= 0:
+            return {"success":False,"reason":"Nothing to close."}
+
+        pl = round(
+            ((price - entry) * close_size if side=="BUY"
+             else (entry - price) * close_size), 2
+        )
+        risk_1r            = float(position.get("risk_1r") or position.get("risk_amount") or 0)
+        previous_realized  = float(position.get("realized_pl") or 0)
+        total_realized     = round(previous_realized + pl, 2)
+
+        # Balance is updated atomically inside finalize_trade/finalize_partial_close
+        # Do NOT update balance here — that would break atomicity
+
+        # Duration
+        duration = ""
+        try:
+            opened   = datetime.fromisoformat(
+                str(position["opened_at"]).replace(" ","T")[:19])
+            secs     = int((datetime.utcnow() - opened).total_seconds())
+            h, m     = secs // 3600, (secs % 3600) // 60
+            duration = f"{h}h {m}m" if h else f"{m}m"
+        except Exception as _e:
+            _log(f"Duration calculation error: {_e}")
+
+        # ── PARTIAL CLOSE ────────────────────────────────────────────
+        if partial < 1.0:
+            new_size    = round(current_size - close_size, 6)
+            journal_evt = {
+                "action":            "PARTIAL_TP",
+                "trade_id":          position.get("trade_id",""),
+                "symbol":            position["symbol"],
+                "side":              side,
+                "entry":             entry,
+                "exit":              price,
+                "size":              close_size,
+                "pl":                pl,
+                "r_multiple":        round(pl/risk_1r,3) if risk_1r>0 else 0,
+                "realized_pl_total": total_realized,
+                "reason":            reason,
+                "timestamp":         datetime.utcnow().isoformat(),
+            }
+            # Snapshot current state — restore if DB fails
+            _snap = {
+                "size":           position.get("size"),
+                "realized_pl":    position.get("realized_pl"),
+                "partial_closed": position.get("partial_closed"),
+            }
+            # Deterministic event_id — same logical event survives retries
+            # Uses trade_id + next partial_seq so same partial is always the same event
+            next_seq  = int(position.get("partial_seq", 0)) + 1
+            event_id  = f"{position.get('trade_id','unknown')}:partial:{next_seq}"
+            try:
+                ok, new_balance = finalize_partial_close(
+                    trade_id    = position.get("trade_id",""),
+                    event_id    = event_id,
+                    pl          = pl,
+                    new_size    = new_size,
+                    realized_pl = total_realized,
+                    position    = position,
+                    journal_event = journal_evt,
+                )
+            except Exception as _e:
+                _log(f"CRITICAL: finalize_partial_close failed: {_e}")
+                ok, new_balance = False, 0.0
+
+            if not ok:
+                # Restore snapshot — DB did not commit
+                position.update(_snap)
+                _log(f"PARTIAL CLOSE FAILED for #{position.get('trade_id','')} "
+                     f"— position state restored to pre-close values")
+                return {"success":False,"reason":"Partial close DB transaction failed"}
+
+            # DB confirmed — now update in-memory state
+            position["size"]           = new_size
+            position["realized_pl"]    = total_realized
+            position["partial_closed"] = True
+            return {
+                "success":        True,
+                "partial":        True,
+                "realized_pl":    total_realized,
+                "new_balance":    new_balance,
+                "closed_size":    close_size,
+                "remaining_size": new_size,
+            }
+
+        # ── FULL CLOSE ───────────────────────────────────────────────
+        # Use initial_size for trade record (reflects full original position)
+        initial_size = float(position.get("initial_size") or current_size)
+        realized_r   = round(total_realized / risk_1r, 3) if risk_1r > 0 else 0
+
+        # save_closed_trade handled atomically by finalize_trade above
+
+        # Atomic: balance + trade_history + position close in one transaction
+        from database import finalize_trade
+        try:
+            atomic_ok, new_balance = finalize_trade(
+                trade_id     = position.get("trade_id",""),
+                final_leg_pl = pl,        # only the final leg (partials already credited)
+                total_pl     = total_realized,  # cumulative for analytics
+                closed_trade = {
+                    "trade_id":           position.get("trade_id",""),
+                    "symbol":             position["symbol"],
+                    "side":               side,
+                    "entry":              entry,
+                    "exit":               price,
+                    "stop_loss":          position.get("stop_loss",0),
+                    "take_profit":        position.get("take_profit",0),
+                    "size":               initial_size,
+                    "risk":               risk_1r,
+                    "risk_1r":            risk_1r,
+                    "pl":                 total_realized,
+                    "duration":           duration,
+                    "exit_reason":        _classify_exit(reason, total_realized, 1.0),
+                    "exit_type":          _get_exit_type(reason, total_realized, 1.0),
+                    "mfe":                position.get("mfe",0),
+                    "mae":                position.get("mae",0),
+                    "mfe_r":              position.get("mfe_r",0),
+                    "mae_r":              position.get("mae_r",0),
+                    "be_trigger_r":       position.get("be_trigger_r",0),
+                    "realized_r":         realized_r,
+                    "planned_rr":         position.get("planned_rr", position.get("rr",0)),
+                    "planned_tp_r":       position.get("planned_tp_r",0),
+                    "planned_tp_dollars": position.get("planned_tp_dollars",0),
+                    "confidence":         position.get("confidence",0),
+                    "mode":               position.get("trade_mode","STRUCTURED"),
+                    "session":            position.get("session",""),
+                    "trend":              position.get("entry_trend",""),
+                    "structure":          position.get("entry_structure",""),
+                    "rsi":                position.get("entry_rsi",0),
+                    "opened_at":          position.get("opened_at") or None,
+                }
+            )
+        except Exception as _ft_e:
+            _log(f"CRITICAL: finalize_trade raised: {_ft_e} "
+                 f"#{position.get('trade_id','')}")
+            atomic_ok, new_balance = False, 0.0
+        if not atomic_ok:
+            _log(f"CRITICAL: finalize_trade failed #{position.get('trade_id','')} "
+                 f"— position may still appear open")
+            return {"success":False,"reason":"DB transaction failed","pl":0,
+                    "new_balance":None,"duration":duration,"r_multiple":0}
+        # new_balance is from the atomic DB transaction — do NOT call save_balance again
+
+        append_trade({
+            "action":            "CLOSE",
+            "trade_id":          position.get("trade_id",""),
+            "symbol":            position["symbol"],
+            "side":              side,
+            "entry":             entry,
+            "exit":              price,
+            "size":              initial_size,
+            "pl":                total_realized,
+            "r_multiple":        realized_r,
+            "new_balance":       new_balance,
+            "duration":          duration,
+            "exit_reason":       _classify_exit(reason, total_realized, 1.0),
+            "exit_type":         _get_exit_type(reason, total_realized, 1.0),
+            "risk_1r":           risk_1r,
+            "mfe":               position.get("mfe",0),
+            "mae":               position.get("mae",0),
+            "mfe_r":             position.get("mfe_r",0),
+            "mae_r":             position.get("mae_r",0),
+            "realized_r":        realized_r,
+            "planned_rr":        position.get("planned_rr", position.get("rr",0)),
+            "planned_tp_r":      position.get("planned_tp_r",0),
+            "planned_tp_dollars":position.get("planned_tp_dollars",0),
+            "confidence":        position.get("confidence",0),
+            "timestamp":         datetime.utcnow().isoformat(),
+        })
+
+        _log(
+            f"{'WIN' if total_realized>=0 else 'LOSS'} "
+            f"#{position.get('trade_id','')} {position['symbol']} "
+            f"P/L ${total_realized:+,.2f} ({realized_r:+.2f}R) | "
+            f"Balance ${new_balance:,.2f} | {reason}"
+        )
+        return {
+            "success":     True,
+            "partial":     False,
+            "pl":          total_realized,
+            "new_balance": new_balance,
+            "duration":    duration,
+            "r_multiple":  realized_r,
+        }
+
+    except Exception as e:
+        _log(f"close_trade error: {e}")
+        return {"success":False,"pl":0,"new_balance":None,
+                "duration":"","r_multiple":0,"reason":str(e)}
+
+
+# ── Open trade ────────────────────────────────────────────────────────────
+
+def open_trade(symbol: str, decision: dict, analysis: dict,
+               balance: float) -> dict:
+    """Open a new position with full planned opportunity tracking."""
+    try:
+        side       = decision.get("decision","")
+        price      = analysis.get("price", 0)
+        atr        = analysis.get("atr14", 0)
+        confidence = decision.get("confidence",{}).get("total", 60)
+        ms         = analysis.get("ms",{})
+
+        # Normalize + validate inputs
+        symbol = str(symbol).strip().upper()
+        side   = str(side).strip().upper()
+        VALID_U = {str(s).strip().upper() for s in VALID_SYMBOLS}
+        if symbol not in VALID_U:
+            return {"success":False,"reason":f"Invalid symbol: {symbol}"}
+        if side not in ("BUY","SELL"):
+            return {"success":False,"reason":f"Invalid side: {side}"}
+        if price <= 0:
+            return {"success":False,"reason":"Invalid price."}
+        if atr <= 0:
+            return {"success":False,"reason":"Invalid ATR (insufficient candle data)."}
+
+        calc = calc_position(balance, price, atr, side, confidence)
+
+        # Two-stage sizing:
+        # Stage 1: confidence determines risk budget (max dollar risk)
+        # Stage 2: final structural SL determines position size
+        dec_levels  = decision.get("levels", {})
+        risk_budget = calc["risk_1r"]   # confidence-based budget
+        if dec_levels.get("stop_loss",0) > 0:
+            calc["stop_loss"]   = dec_levels["stop_loss"]
+            calc["take_profit"] = dec_levels["take_profit"]
+
+        # Recalculate everything from final SL distance
+        sl_d = abs(price - calc["stop_loss"])
+        tp_d = abs(calc["take_profit"] - price)
+        if sl_d <= 0 or tp_d <= 0:
+            return {"success":False,"reason":"Invalid SL/TP distance after override."}
+
+        # Validate SL/TP direction relative to entry
+        if side == "BUY":
+            if calc["stop_loss"] >= price:
+                return {"success":False,"reason":f"BUY stop_loss {calc['stop_loss']} must be below entry {price}."}
+            if calc["take_profit"] <= price:
+                return {"success":False,"reason":f"BUY take_profit {calc['take_profit']} must be above entry {price}."}
+        else:
+            if calc["stop_loss"] <= price:
+                return {"success":False,"reason":f"SELL stop_loss {calc['stop_loss']} must be above entry {price}."}
+            if calc["take_profit"] >= price:
+                return {"success":False,"reason":f"SELL take_profit {calc['take_profit']} must be below entry {price}."}
+
+        calc["sl_dist"]         = sl_d
+        calc["tp_dist"]         = tp_d
+        calc["size"]            = round(risk_budget / sl_d, 8)
+        calc["risk_1r"]         = round(calc["size"] * sl_d, 2)
+        calc["rr"]              = round(tp_d / sl_d, 2)
+        calc["expected_profit"] = round(calc["size"] * tp_d, 2)
+
+        # Hard cap
+        if calc["risk_1r"] > MAX_RISK_USD:
+            calc["size"]    = round(MAX_RISK_USD / sl_d, 8)
+            calc["risk_1r"] = round(calc["size"] * sl_d, 2)  # recalculate after cap
+        calc["expected_profit"] = round(calc["size"] * tp_d, 2)
+
+        rr = calc["rr"]
+
+        check = check_rules(symbol, side, analysis, confidence, rr,
+                            balance, calc["expected_profit"])
+        if not check["approved"]:
+            return {"success":False,"reason":check["reason"]}
+
+        trade_id = str(uuid.uuid4()).replace('-','').upper()[:12]  # 12-char, unambiguous, not truncated to 8
+
+        # Determine entry timeframe — lowest aligned TF (not order-dependent)
+        frames = analysis.get("frames",[])
+        TF_RANK = {"15M":15,"15m":15,"1H":60,"4H":240,"DAILY":1440,"1D":1440}
+        aligned_tfs = [f for f in frames
+                       if str(f.get("decision","")).upper() == side.upper()]
+        if aligned_tfs:
+            entry_tf = min(
+                aligned_tfs,
+                key=lambda f: TF_RANK.get(str(f.get("label","")).upper(), 9999)
+            ).get("label","")
+        else:
+            entry_tf = ""
+
+        position = {
+            "trade_id":          trade_id,
+            "symbol":            symbol,
+            "side":              side,
+            "entry_price":       price,
+            "size":              calc["size"],
+            "initial_size":      calc["size"],   # never changes
+            "risk_amount":       calc["risk_1r"],
+            "risk_1r":           calc["risk_1r"],
+            "stop_loss":         calc["stop_loss"],
+            "take_profit":       calc["take_profit"],
+            "sl_dist":           calc["sl_dist"],
+            "tp_dist":           calc["tp_dist"],
+            "rr":                rr,
+            "planned_rr":        rr,
+            "planned_tp_r":      rr,
+            "planned_tp_dollars":calc["expected_profit"],
+            "realized_pl":       0.0,
+            "confidence":        confidence,
+            "trade_mode":        "STRUCTURED",
+            "entry_timeframe":   entry_tf,
+            "entry_trend":       ms.get("trend",""),
+            "entry_structure":   ms.get("structure",""),
+            "entry_rsi":         round(analysis.get("rsi14",50), 1),
+            "be_moved":          False,
+            "profit_locked":     False,
+            "partial_closed":    False,
+            "trail_sl":          False,
+            "atr_at_open":       atr,
+            "mfe":               0.0,
+            "mae":               0.0,
+            "mfe_r":             0.0,
+            "mae_r":             0.0,
+            "be_trigger_r":      0.0,
+            "opened_at":         datetime.utcnow().isoformat(),
+            "status":            "OPEN",
+            "sl_moved_at":       None,
+        }
+
+        create_position(position)
+        # Opening a position does not change balance in paper trading.
+        # Balance only changes when positions close (in close_trade).
+
+        size_desc = calc.get("size_label","")
+        if not trade_id:
+            return {"success":False,"reason":"Generated trade_id is empty — cannot open."}
+        append_trade({
+            "action":         "OPEN",
+            "trade_id":       trade_id,
+            "symbol":         symbol,
+            "side":           side,
+            "entry_price":    price,
+            "stop_loss":      calc["stop_loss"],
+            "take_profit":    calc["take_profit"],
+            "size":           calc["size"],
+            "risk_1r":        calc["risk_1r"],
+            "rr":             round(rr, 2),
+            "confidence":     confidence,
+            "planned_tp":     calc["expected_profit"],
+            "entry_timeframe":entry_tf,
+            "structure":      ms.get("sequence",""),
+            "size_label":     size_desc,
+            "timestamp":      datetime.utcnow().isoformat(),
+        })
+
+        _log(
+            f"OPENED #{trade_id} {side} {calc['size']} {symbol} "
+            f"@ ${price:,.2f} | SL ${calc['stop_loss']:,.2f} "
+            f"| TP ${calc['take_profit']:,.2f} "
+            f"| R:R 1:{rr:.2f} | Risk ${calc['risk_1r']:.2f} "
+            f"| TP ~${calc['expected_profit']:.2f} | {size_desc}"
+        )
+        return {
+            "success":  True,
+            "trade_id": trade_id,
+            "position": position,
+        }
+
+    except Exception as e:
+        _log(f"open_trade error: {e}")
+        return {"success":False,"reason":str(e)}
+
+
+# ── Manage position ───────────────────────────────────────────────────────
+
+def manage_position(position: dict, price: float,
+                    atr: float, analysis: dict) -> bool:
+    """
+    R-Based Milestone System:
+      +1.25R → Break-even (SL to entry)
+      +2.0R  → Lock +1R profit
+      +3.0R  → Partial TP 50% + activate trail
+      +3.0R+ → Let remainder run if structure valid
+
+    Timeout: entry_timeframe determines hold duration.
+    Returns True if position was closed.
+    """
+    try:
+        trade_id = str(position.get("trade_id","")).strip()
+        if not trade_id:
+            _log("manage_position called with empty trade_id — skipping")
+            return False
+
+        entry   = float(position["entry_price"])
+        sl      = float(position["stop_loss"])
+        tp      = float(position["take_profit"])
+        side    = position["side"]
+        size    = float(position.get("size",0))
+        risk_1r = float(
+            position.get("risk_1r") or
+            position.get("risk_amount") or 0
+        )
+        if risk_1r <= 0:
+            _log(f"Missing risk_1r for #{trade_id} "
+                 f"— refusing to manage (position data corrupt).")
+            return False
+
+        # ── Three separate P/L concepts ───────────────────────────────────
+        # current_pl   = money at stake on REMAINING position (for SL/TP)
+        # excursion_pl = what ORIGINAL trade is doing at this price
+        # excursion_r  = milestone R — based on original size/risk
+        initial_size = float(position.get("initial_size") or size or 0)
+
+        current_pl = round(
+            ((price - entry) * size if side=="BUY"
+             else (entry - price) * size), 2
+        )
+        excursion_pl = round(
+            ((price - entry) * initial_size if side=="BUY"
+             else (entry - price) * initial_size), 2
+        )
+        excursion_r = round(excursion_pl / risk_1r, 4) if risk_1r > 0 else 0.0
+
+        # Keep fl as alias for current_pl (used in log messages)
+        fl = current_pl
+
+        # ── MFE/MAE using candle high/low + initial_size ──────────────────
+        candles = analysis.get("candles",[])
+        if candles:
+            last_candle     = candles[-1]
+            favorable_price = last_candle["high"] if side=="BUY" else last_candle["low"]
+            adverse_price   = last_candle["low"]  if side=="BUY" else last_candle["high"]
+        else:
+            favorable_price = price
+            adverse_price   = price
+
+        mfe_pl = round((favorable_price - entry) * initial_size
+                       if side=="BUY"
+                       else (entry - favorable_price) * initial_size, 2)
+        mae_pl = round((adverse_price - entry) * initial_size
+                       if side=="BUY"
+                       else (entry - adverse_price) * initial_size, 2)
+
+        _mfe_changed = _mae_changed = False
+        if risk_1r > 0:
+            if mfe_pl > float(position.get("mfe", 0.0)):
+                position["mfe"]   = round(mfe_pl, 4)
+                position["mfe_r"] = round(mfe_pl / risk_1r, 3)
+                _mfe_changed = True
+            if mae_pl < float(position.get("mae", 0.0)):
+                position["mae"]   = round(mae_pl, 4)
+                position["mae_r"] = round(mae_pl / risk_1r, 3)
+                _mae_changed = True
+
+        # ── Hard SL/TP ───────────────────────────────────────────────────
+        if side == "BUY":
+            if price <= sl:
+                # Classify stop based on what kind of stop it is
+                if position.get("trail_sl",False):
+                    sl_reason = "Trailing stop hit"
+                elif position.get("profit_locked",False):
+                    sl_reason = "Profit lock hit"
+                elif position.get("be_moved",False):
+                    sl_reason = "Break-even stop hit"
+                else:
+                    sl_reason = "Stop Loss hit"
+                result = close_trade(position, price, sl_reason)
+                if result.get("success"): return True
+                _log(f"CRITICAL: SL close failed #{trade_id}: {result.get('reason','')} ")
+                return False
+            if price >= tp:
+                result = close_trade(position, price, "Take Profit hit")
+                if result.get("success"): return True
+                _log(f"CRITICAL: TP close failed #{trade_id}: {result.get('reason','')} ")
+                return False
+        else:
+            if price >= sl:
+                if position.get("trail_sl",False):
+                    sl_reason = "Trailing stop hit"
+                elif position.get("profit_locked",False):
+                    sl_reason = "Profit lock hit"
+                elif position.get("be_moved",False):
+                    sl_reason = "Break-even stop hit"
+                else:
+                    sl_reason = "Stop Loss hit"
+                close_trade(position, price, sl_reason); return True
+            if price <= tp:
+                close_trade(position, price, "Take Profit hit"); return True
+
+        # ── Structure validity ────────────────────────────────────────────
+        protected = (
+            position.get("be_moved",     False) or
+            position.get("profit_locked", False) or
+            position.get("trail_sl",      False)
+        )
+        if not structure_still_valid(position, analysis):
+            if protected:
+                _log(f"Structure shifted but protected — holding "
+                     f"#{position.get('trade_id','')}")
+            else:
+                reason = (f"Structure invalidated — "
+                          f"{analysis.get('ms',{}).get('trend','')} reversed "
+                          f"(P/L ${fl:+.2f})")
+                result = close_trade(position, price, reason)
+                if result.get("success"): return True
+                _log(f"CRITICAL: Structure close failed #{trade_id}: {result.get('reason','')} ")
+                return False
+
+        # ── Timeout ───────────────────────────────────────────────────────
+        try:
+            opened     = datetime.fromisoformat(
+                str(position["opened_at"]).replace(" ","T")[:19])
+            now_utc    = datetime.utcnow().replace(tzinfo=None)
+            opened_naive = opened.replace(tzinfo=None)
+            hours_open = (now_utc - opened_naive).total_seconds() / 3600
+            timeout_h  = get_timeout_hours(position)
+
+            if hours_open >= MAX_HOLD_DAYS * 24:
+                result = close_trade(position, price,
+                                      f"Max hold {MAX_HOLD_DAYS}d reached (${fl:.2f})")
+                if result.get("success"): return True
+                _log(f"CRITICAL: Max hold close failed #{trade_id}: {result.get('reason','')} ")
+                return False
+            # Total P/L = realized partials + current remaining position
+            total_trade_pl = float(position.get("realized_pl",0)) + current_pl
+            total_r_now    = total_trade_pl / risk_1r if risk_1r > 0 else 0
+            min_r_hold     = 0.3  # configurable: move to MIN_TIMEOUT_PROGRESS_R in config
+            if hours_open >= timeout_h and total_r_now < min_r_hold:
+                result = close_trade(position, price,
+                                      f"Timeout {hours_open:.1f}h no progress "
+                                      f"({total_r_now:+.2f}R / ${total_trade_pl:.2f})")
+                if result.get("success"): return True
+                _log(f"CRITICAL: Timeout close failed #{trade_id}: {result.get('reason','')} ")
+                return False
+            if hours_open >= 48 and not position.get("partial_closed"):
+                close_trade(position, price,
+                            f"48h timeout — freeing capital (${fl:.2f})")
+                return True
+        except Exception as _e:
+            _log(f"Timeout check error: {_e}")
+
+        # ══════════════════════════════════════════════════════════════
+        # R-BASED MILESTONE SYSTEM
+        #   +1.25R → Break-even (SL to entry)
+        #   +2.0R  → Lock +1R profit
+        #   +3.0R  → Partial TP 50% + activate trail
+        #   +3.0R+ → Let remainder run if structure valid
+        # ══════════════════════════════════════════════════════════════
+        if risk_1r <= 0 or not (-10 <= excursion_r < 100):
+            _log(f"Skipping milestones: invalid excursion_r={excursion_r:.3f} "
+                 f"risk_1r={risk_1r:.4f} #{position.get('trade_id','')}")
+            return False
+
+
+        # ── Milestone 1: Break-even at +1.25R ────────────────────────────
+        if not position.get("be_moved", False) and excursion_r >= 1.25:  # +1.25R
+            # Use symbol tick_size — not hardcoded $0.01 which is wrong for BTC/high-price assets
+            tick_size = float(position.get("tick_size", 0.01))
+            be_sl = round(entry + tick_size, 8) if side=="BUY" else round(entry - tick_size, 8)
+            if (side=="BUY" and be_sl > sl) or (side=="SELL" and be_sl < sl):
+                old_sl    = sl
+                # Snapshot before mutation — restore on DB failure
+                _sl_before = sl
+                _be_before = position.get("be_moved", False)
+                _betr_before = position.get("be_trigger_r", 0)
+                position["stop_loss"]    = be_sl
+                position["be_moved"]     = True
+                position["be_trigger_r"] = round(excursion_r, 3)
+                sl = be_sl  # refresh local sl
                 try:
-                    if d.get("data") and d["data"] != "{}":
-                        d.update(json.loads(d["data"]))
-                except Exception:
-                    pass
-                if d.get("ts") and not isinstance(d["ts"], str):
-                    d["ts"] = d["ts"].isoformat()
-                result.append(d)
-            return result
+                    update_position_state(trade_id, {
+                        "stop_loss":    position["stop_loss"],
+                        "be_moved":     True,
+                        "be_trigger_r": position["be_trigger_r"],
+                    })
+                except Exception as _e:
+                    # Restore snapshot — DB did not commit
+                    position["stop_loss"]    = _sl_before
+                    position["be_moved"]     = _be_before
+                    position["be_trigger_r"] = _betr_before
+                    sl = _sl_before
+                    _log(f"CRITICAL: BE state update failed: {_e} "
+                         f"#{position.get('trade_id','')}")
+                    return False
+                append_trade({
+                    "action":    "SL_MOVED_BE",
+                    "trade_id":  position.get("trade_id",""),
+                    "symbol":    position["symbol"],
+                    "new_sl":    be_sl,
+                    "old_sl":    old_sl,  # captured before sl=be_sl mutation
+                    "profit_at": round(excursion_pl, 2),
+                    "r_at_move": round(excursion_r, 3),
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
+                _log(f"BE @ ${be_sl:,.2f} | +{excursion_r:.2f}R (${excursion_pl:.2f}) "
+                     f"— BREAK-EVEN PROTECTION #{position.get('trade_id','')}")
+
+        # ── Milestone 2: Lock +1R at +2R ─────────────────────────────────
+        if (position.get("be_moved", False) and
+                not position.get("profit_locked", False) and
+                excursion_r >= 2.0):
+            sl_dist    = float(position.get("sl_dist",0)) or abs(entry - sl)
+            lock_price = (round(entry + sl_dist, 2) if side=="BUY"
+                         else round(entry - sl_dist, 2))
+            locked_usd = round(abs(lock_price - entry) * size, 2)
+            cur_sl     = position["stop_loss"]
+            if (side=="BUY" and lock_price > cur_sl) or \
+               (side=="SELL" and lock_price < cur_sl):
+                _lock_sl_before  = position["stop_loss"]
+                _lock_pl_before  = position.get("profit_locked", False)
+                position["stop_loss"]    = lock_price
+                position["profit_locked"]= True
+                sl = lock_price  # refresh local sl
+                try:
+                    update_position_state(trade_id, {
+                        "stop_loss":     lock_price,
+                        "profit_locked": True,
+                    })
+                except Exception as _e:
+                    # Restore snapshot on DB failure
+                    position["stop_loss"]    = _lock_sl_before
+                    position["profit_locked"]= _lock_pl_before
+                    sl = _lock_sl_before
+                    _log(f"CRITICAL: Lock state update failed: {_e} "
+                         f"#{position.get('trade_id','')}")
+                    return False
+                append_trade({
+                    "action":     "PROFIT_LOCKED",
+                    "trade_id":   position.get("trade_id",""),
+                    "symbol":     position["symbol"],
+                    "new_sl":     lock_price,
+                    "old_sl":     cur_sl,
+                    "locked_usd": locked_usd,
+                    "profit_at":  round(excursion_pl, 2),
+                    "r_at_move":  round(excursion_r, 2),
+                    "timestamp":  datetime.utcnow().isoformat(),
+                })
+                _log(f"1R LOCKED — SL→${lock_price:,.2f} "
+                     f"(~${locked_usd:.2f}) #{position.get('trade_id','')}")
+
+        # ── Milestone 3: Partial TP at +3R ───────────────────────────────
+        if not position.get("partial_closed", False) and excursion_r >= 3.0:  # +3.0R
+            r_label = round(excursion_r, 1)
+            result  = close_trade(position, price,
+                                  f"Partial TP +{r_label}R (${excursion_pl:.2f})",
+                                  partial=0.5)
+            if result.get("success"):
+                _log(f"PARTIAL TP 50% @ ${price:,.2f} "
+                     f"(+{r_label}R / +${excursion_pl:.2f})")
+            # Return False — next scan recalculates with reduced size
+            # Persist MFE/MAE after partial close
+            if _mfe_changed or _mae_changed:
+                try:
+                    update_position_state(trade_id, {
+                        "mfe":   position.get("mfe",0),
+                        "mae":   position.get("mae",0),
+                        "mfe_r": position.get("mfe_r",0),
+                        "mae_r": position.get("mae_r",0),
+                    })
+                except Exception as _e:
+                    _log(f"MFE/MAE post-partial save failed: {_e}")
+            return False
+
+        # ── Milestone 4: Trail after +3R ─────────────────────────────────
+        if (position.get("partial_closed", False) and
+                excursion_r >= 3.0 and atr > 0):
+            trail_dist = atr * TRAIL_ATR_MULT
+            if side == "BUY":
+                new_sl = round(price - trail_dist, 2)
+                if new_sl > position["stop_loss"]:
+                    _trail_sl_before   = position["stop_loss"]
+                    _trail_flag_before = position.get("trail_sl", False)
+                    position["stop_loss"] = new_sl
+                    position["trail_sl"]  = True
+                    sl = new_sl  # refresh local sl
+                    try:
+                        update_position_state(trade_id, {
+                            "stop_loss": new_sl,
+                            "trail_sl":  True,
+                        })
+                    except Exception as _e:
+                        position["stop_loss"] = _trail_sl_before
+                        position["trail_sl"]  = _trail_flag_before
+                        sl = _trail_sl_before
+                        _log(f"CRITICAL: Trail SL update failed: {_e}")
+                        return False
+                    _log(f"TRAIL SL→${new_sl:,.2f} #{position.get('trade_id','')}")
+            else:
+                new_sl = round(price + trail_dist, 2)
+                if new_sl < position["stop_loss"]:
+                    _ts_before   = position["stop_loss"]
+                    _tf_before   = position.get("trail_sl", False)
+                    position["stop_loss"] = new_sl
+                    position["trail_sl"]  = True
+                    sl = new_sl
+                    try:
+                        update_position_state(trade_id, {
+                            "stop_loss": new_sl,
+                            "trail_sl":  True,
+                        })
+                    except Exception as _e:
+                        position["stop_loss"] = _ts_before
+                        position["trail_sl"]  = _tf_before
+                        sl = _ts_before
+                        _log(f"CRITICAL: SELL trail update failed: {_e}")
+                        return False
+                    _log(f"TRAIL SL→${new_sl:,.2f} #{position.get('trade_id','')}")
+
+        # Periodic MFE/MAE persist (every 5 scans to avoid DB overload)
+        if _mfe_changed or _mae_changed:
+            _scan_count = position.get("_scan_count", 0) + 1
+            position["_scan_count"] = _scan_count
+            if _scan_count % 5 == 0:
+                try:
+                    update_position_state(trade_id, {
+                        "mfe":   position.get("mfe",0),
+                        "mae":   position.get("mae",0),
+                        "mfe_r": position.get("mfe_r",0),
+                        "mae_r": position.get("mae_r",0),
+                    })
+                except Exception as _e:
+                    _log(f"Periodic MFE/MAE save failed: {_e}")
+
+        return False
+
     except Exception as e:
-        print(f"[DB] load_journal error: {e}")
-        return []
-    finally:
-        conn.close()
+        _log(f"manage_position error: {e}")
+        return False  # bool only — consistent with all other returns
 
 
-# ── Trade history ──────────────────────────────────────────────────────────
+# ── Auto trading loop ─────────────────────────────────────────────────────
 
-def _cast_trade(d: dict) -> dict:
-    """Cast trade_history row with field-specific precision."""
-    for f in ("entry","exit_price","stop_loss","take_profit"):
-        d[f] = float(_d0(d.get(f,0), PRICE))
-    d["exit"]  = d.get("exit_price", 0)
-    d["size"]  = float(_d0(d.get("size",0), SIZE))
-    for f in ("pl","total_pl","risk","risk_1r","mfe","mae",
-               "planned_tp_dollars","new_balance"):
-        d[f] = float(_d0(d.get(f,0), MONEY))
-    for f in ("mfe_r","mae_r","be_trigger_r","realized_r",
-               "planned_rr","planned_tp_r"):
-        d[f] = float(_d0(d.get(f,0), RATIO))
-    d["rr"]         = float(_d0(d.get("planned_rr",0), RATIO))
-    d["confidence"] = int(d.get("confidence",0) or 0)
-    d["exit_type"]  = str(d.get("exit_type") or "UNKNOWN")
-    d["closed_at"]  = d["closed_at"].isoformat() if d.get("closed_at") else ""
-    return d
+def _auto_loop():
+    global _auto_running
+    from scanner    import scan
+    from analyzer   import analyze
+    from decision_engine import decide
 
-def load_closed_trades(days: int = 999) -> list:
-    """Returns [] on error — analytics is non-critical."""
-    conn = get_conn()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT * FROM trade_history "
-                "WHERE closed_at >= NOW() - (INTERVAL '1 day' * %s) "
-                "ORDER BY closed_at DESC",
-                (int(days),))
-            return [_cast_trade(dict(r)) for r in cur.fetchall()]
-    except Exception as e:
-        print(f"[DB] load_closed_trades error: {e}")
-        return []
-    finally:
-        conn.close()
+    _log("Aria Professional Engine started.")
 
+    while _auto_running:
+        try:
+            # Load account once per cycle — not once per symbol
+            try:
+                from database import get_account
+                account = get_account()
+            except Exception as _e:
+                _log(f"Account load error: {_e} — skipping cycle")
+                import time; time.sleep(SCAN_INTERVAL_SECONDS); continue
 
-def load_closed_trades_today() -> list:
-    """
-    RAISES on DB error — executor catches and blocks new entries.
-    Correct daily loss = partial_close_events today + trade_history.pl today.
-    (trade_history.pl = final leg only; does NOT double-count partials.)
-    Returns both combined in the same list for simplicity.
-    """
-    conn = get_conn()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Closed trades today (final leg P/L only)
-            cur.execute("""
-                SELECT trade_id, symbol, side, pl AS pl,
-                       total_pl, COALESCE(risk_1r,risk,0) AS risk_1r,
-                       exit_type, closed_at AS ts
-                FROM trade_history
-                WHERE closed_at >= DATE_TRUNC('day', NOW())
-                ORDER BY closed_at DESC
-            """)
-            hist_rows = cur.fetchall()
+            if not account:
+                _log("CRITICAL: account unavailable — skipping cycle")
+                import time; time.sleep(SCAN_INTERVAL_SECONDS); continue
 
-            # Partial closes today — explicit columns, no aliasing tricks
-            cur.execute("""
-                SELECT event_id, trade_id,
-                       pl, pl AS total_pl, 0 AS risk_1r,
-                       'PARTIAL_TP' AS exit_type, ts
-                FROM partial_close_events
-                WHERE ts >= DATE_TRUNC('day', NOW())
-                ORDER BY ts DESC
-            """)
-            partial_rows = cur.fetchall()
+            balance = float(account["balance"])
 
-        result = []
-        for r in list(hist_rows) + list(partial_rows):
-            d = dict(r)
-            d["pl"]       = float(_d0(d.get("pl",0),       MONEY))
-            d["total_pl"] = float(_d0(d.get("total_pl",0), MONEY))
-            d["risk_1r"]  = float(_d0(d.get("risk_1r",0),  MONEY))
-            d["ts"]       = d["ts"].isoformat() if d.get("ts") else ""
-            result.append(d)
-        return result
-    finally:
-        conn.close()
+            for symbol in VALID_SYMBOLS:
+                try:
+                    scan_data = scan(symbol)
+                    analysis  = analyze(scan_data)
+                    if "error" in analysis:
+                        _log(f"{symbol} analysis error: {analysis['error']}")
+                        continue
 
+                    analysis["candles"] = scan_data.get("candles",[])
+                    price = analysis.get("price", 0)
 
-# ── Shims (read-only safe fallbacks) ──────────────────────────────────────
+                    # Manage open positions
+                    closed_this_scan = False
+                    try:
+                        open_pos = get_open_positions()
+                    except Exception as _db_e:
+                        _log(f"DB ERROR getting positions — skipping {symbol}: {_db_e}")
+                        continue
+                    for pos in [p for p in open_pos if p["symbol"] == symbol]:
+                        try:
+                            was_closed = manage_position(pos, price,
+                                            analysis.get("atr14",0), analysis)
+                            if was_closed is True:
+                                closed_this_scan = True
+                        except Exception as _e:
+                            _log(f"manage error {symbol}: {_e}")
 
-def save_balance(balance: float):
-    """
-    DISABLED for trading — bypasses atomic transactions.
-    Use finalize_trade() or finalize_partial_close() for all trade-related balance changes.
-    For admin corrections, use admin_set_balance() with an audit reason.
-    """
-    raise RuntimeError(
-        "save_balance() is disabled. Use finalize_trade() for trade closes. "
-        "For manual adjustments, use admin_set_balance(reason=...).")
+                    # Reload balance — management may have closed positions
+                    try:
+                        balance = load_balance()
+                    except Exception as _lb_e:
+                        _log(f"DB error reloading balance: {_lb_e} — skipping entry")
+                        continue
 
+                    # Prevent same-scan close → immediate re-entry
+                    if closed_this_scan:
+                        _log(f"{symbol} closed this scan — skipping entry")
+                        continue
 
-def admin_set_balance(balance: float, reason: str = "manual adjustment"):
-    """Audited direct balance write — for migration/admin only."""
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE account SET balance=%s, updated_at=NOW() WHERE id=1",
-                (float(_d(balance, MONEY)),))
-            cur.execute("""
-                INSERT INTO journal(record_id,action,symbol,side,reason,data)
-                VALUES(%s,'ADMIN_BALANCE','','',  %s,%s)
-            """, (str(uuid.uuid4())[:8], reason,
-                  f'{{"new_balance":{float(balance)},"reason":"{reason}"}}'))
-        conn.commit()
-    finally:
-        conn.close()
+                    # Decide
+                    try:
+                        decision = decide(analysis)
+                    except Exception as _e:
+                        _log(f"{symbol} decide error: {_e}")
+                        continue
+
+                    dec   = decision.get("decision","WAIT")
+                    conf  = decision.get("confidence",{}).get("total",0)
+                    trend = analysis.get("ms",{}).get("trend","")
+                    sp    = analysis.get("ms",{}).get("strength_pct",0)
+                    frames= analysis.get("frames",[])
+                    tf_total = len(frames)
+                    tf_ok    = sum(1 for f in frames if f.get("decision")==dec)
+
+                    _log(f"{symbol} → {dec} | Conf {conf}% | "
+                         f"Trend {trend} ({sp}%) | "
+                         f"{tf_ok}/{tf_total} TF agree | "
+                         f"RSI {analysis.get('rsi14',0):.1f}")
+
+                    if dec in ("BUY","SELL"):
+                        try:
+                            fresh_balance = load_balance()
+                        except Exception as _lb_e:
+                            _log(f"DB error loading balance before entry: {_lb_e}")
+                            continue
+                        result = open_trade(symbol, decision, analysis, fresh_balance)
+                        if result.get("success"):
+                            balance = fresh_balance
+                        elif result.get("reason"):
+                            _log(f"{symbol} blocked: {result['reason']}")
+
+                except Exception as _e:
+                    _log(f"Auto loop {symbol} error: {_e}")
+
+        except Exception as _e:
+            _log(f"Auto loop outer error: {_e}")
+
+        import time
+        time.sleep(SCAN_INTERVAL_SECONDS)
 
 
-def close_position_in_db(trade_id: str):
-    """DISABLED — direct close bypasses accounting. Use finalize_trade()."""
-    raise RuntimeError(
-        f"close_position_in_db() is disabled. "
-        f"Use finalize_trade() to close {trade_id}.")
+def start_auto_trading():
+    global _auto_thread, _auto_running
+    if _auto_running:
+        return
+    _auto_running = True
+    _auto_thread  = threading.Thread(target=_auto_loop, daemon=True)
+    _auto_thread.start()
+    _log("Aria started — Structure first. Quality only.")
 
 
-def save_closed_trade(trade: dict):
-    """Deprecated — use finalize_trade()."""
-    print("[DB] WARNING: save_closed_trade() is deprecated.")
+def stop_auto_trading():
+    global _auto_running
+    _auto_running = False
+    _log("Auto-trading stopped.")
 
 
-def load_positions_file() -> list:
-    return get_open_positions()
+def get_auto_status() -> dict:
+    return {
+        "running": _auto_running,
+        "thread":  _auto_thread.is_alive() if _auto_thread else False,
+    }
