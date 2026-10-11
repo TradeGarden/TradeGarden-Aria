@@ -46,17 +46,22 @@ from database import (
 )
 
 def save_position(position: dict):
-    """Backward compat shim — routes to create_position or update_position_state."""
+    """
+    Backward-compat shim — routes to update_position_state only.
+    Does NOT fall back to create_position on failure.
+    """
     tid = (position.get("trade_id") or "").strip()
     if not tid:
         return
-    try:
-        update_position_state(tid, position)
-    except Exception:
+    safe = {k:v for k,v in position.items()
+            if k not in {"status","size","realized_pl","partial_seq","partial_closed"}}
+    if safe:
         try:
-            create_position(position)
-        except Exception as e:
-            print(f"[EXEC] save_position shim failed for {tid}: {e}")
+            update_position_state(tid, safe)
+        except RuntimeError as e:
+            if "not OPEN or does not exist" not in str(e):
+                raise
+        # No bare except — unexpected DB errors propagate
 
 
 import threading
@@ -278,20 +283,21 @@ def get_timeout_hours(position: dict) -> float:
 
 def todays_trade_count() -> int:
     """
-    Count positions ENTERED today (open + closed).
-    MAX_TRADES_PER_DAY limits entries, not completions.
-    RAISES if DB unavailable.
+    Count LOGICAL TRADES entered today — unique trade_ids only.
+    One trade = one trade_id regardless of partial events.
+    RAISES on DB failure.
     """
     today = datetime.utcnow().date().isoformat()
-    try:
-        open_today = sum(
-            1 for p in get_open_positions()
-            if str(p.get("opened_at","")).startswith(today)
-        )
-    except Exception:
-        open_today = 0
-    closed_today = len(load_closed_trades_today())  # raises on DB error
-    return open_today + closed_today
+    open_ids = {
+        str(p["trade_id"]) for p in get_open_positions()
+        if str(p.get("opened_at","")).startswith(today)
+    }
+    closed_ids = {
+        str(t.get("trade_id","")).strip()
+        for t in load_closed_trades_today()
+        if str(t.get("trade_id","")).strip()
+    }
+    return len(open_ids | closed_ids)
 
 
 def todays_loss_pct(balance: float) -> float:
@@ -300,11 +306,14 @@ def todays_loss_pct(balance: float) -> float:
     RAISES if DB unavailable — caller must block trading on failure.
     """
     trades = load_closed_trades_today()  # raises on DB error
-    # total_pl = cumulative whole-trade P/L (partials included) — correct for daily loss
+    # Sum pl (not total_pl) from all events today:
+    # partial_close_events.pl = partial leg P/L
+    # trade_history.pl        = final leg P/L
+    # Together they represent actual realized balance movements without double-counting
     losses = sum(
-        float(t.get("total_pl", t.get("pl",0)))
+        float(t.get("pl",0))
         for t in trades
-        if float(t.get("total_pl", t.get("pl",0))) < 0
+        if float(t.get("pl",0)) < 0
     )
     return round(abs(losses) / balance * 100, 2) if balance > 0 else 0.0
 
@@ -491,7 +500,7 @@ def close_trade(position: dict, price: float,
 
         # ── PARTIAL CLOSE ────────────────────────────────────────────
         if partial < 1.0:
-            new_size    = round(current_size - close_size, 6)
+            new_size   = round(current_size - close_size, 8)
             journal_evt = {
                 "action":            "PARTIAL_TP",
                 "trade_id":          position.get("trade_id",""),
@@ -511,8 +520,14 @@ def close_trade(position: dict, price: float,
                 "size":           position.get("size"),
                 "realized_pl":    position.get("realized_pl"),
                 "partial_closed": position.get("partial_closed"),
+                "partial_seq":    position.get("partial_seq", 0),
             }
-            event_id = str(uuid.uuid4())  # unique per attempt — enables retry dedup
+            # Deterministic event_id — same logical event survives retries
+            _ptid = str(position.get("trade_id","")).strip()
+            if not _ptid:
+                return {"success":False,"reason":"Missing trade_id for partial close."}
+            next_seq  = int(position.get("partial_seq", 0)) + 1
+            event_id  = f"{_ptid}:partial:{next_seq}"
             try:
                 ok, new_balance = finalize_partial_close(
                     trade_id    = position.get("trade_id",""),
@@ -538,6 +553,7 @@ def close_trade(position: dict, price: float,
             position["size"]           = new_size
             position["realized_pl"]    = total_realized
             position["partial_closed"] = True
+            position["partial_seq"]    = next_seq  # must update for next event_id
             return {
                 "success":        True,
                 "partial":        True,
@@ -694,10 +710,32 @@ def open_trade(symbol: str, decision: dict, analysis: dict,
         tp_d = abs(calc["take_profit"] - price)
         if sl_d <= 0 or tp_d <= 0:
             return {"success":False,"reason":"Invalid SL/TP distance after override."}
+        if side == "BUY":
+            if calc["stop_loss"] >= price:
+                return {"success":False,"reason":f"BUY stop_loss {calc['stop_loss']} must be below entry {price}"}
+            if calc["take_profit"] <= price:
+                return {"success":False,"reason":f"BUY take_profit {calc['take_profit']} must be above entry {price}"}
+        else:
+            if calc["stop_loss"] <= price:
+                return {"success":False,"reason":f"SELL stop_loss {calc['stop_loss']} must be above entry {price}"}
+            if calc["take_profit"] >= price:
+                return {"success":False,"reason":f"SELL take_profit {calc['take_profit']} must be below entry {price}"}
+
+        # Validate SL/TP direction relative to entry
+        if side == "BUY":
+            if calc["stop_loss"] >= price:
+                return {"success":False,"reason":f"BUY stop_loss {calc['stop_loss']} must be below entry {price}."}
+            if calc["take_profit"] <= price:
+                return {"success":False,"reason":f"BUY take_profit {calc['take_profit']} must be above entry {price}."}
+        else:
+            if calc["stop_loss"] <= price:
+                return {"success":False,"reason":f"SELL stop_loss {calc['stop_loss']} must be above entry {price}."}
+            if calc["take_profit"] >= price:
+                return {"success":False,"reason":f"SELL take_profit {calc['take_profit']} must be below entry {price}."}
 
         calc["sl_dist"]         = sl_d
         calc["tp_dist"]         = tp_d
-        calc["size"]            = round(risk_budget / sl_d, 6)
+        calc["size"]            = round(risk_budget / sl_d, 8)
         calc["risk_1r"]         = round(calc["size"] * sl_d, 2)
         calc["rr"]              = round(tp_d / sl_d, 2)
         calc["expected_profit"] = round(calc["size"] * tp_d, 2)
@@ -715,7 +753,7 @@ def open_trade(symbol: str, decision: dict, analysis: dict,
         if not check["approved"]:
             return {"success":False,"reason":check["reason"]}
 
-        trade_id = str(uuid.uuid4())[:8].upper()
+        trade_id = str(uuid.uuid4()).replace('-','').upper()[:12]  # 12-char, unambiguous, not truncated to 8
 
         # Determine entry timeframe — lowest aligned TF (not order-dependent)
         frames = analysis.get("frames",[])
@@ -906,9 +944,15 @@ def manage_position(position: dict, price: float,
                     sl_reason = "Break-even stop hit"
                 else:
                     sl_reason = "Stop Loss hit"
-                close_trade(position, price, sl_reason); return True
+                result = close_trade(position, price, sl_reason)
+                if result.get("success"): return True
+                _log(f"CRITICAL: SL close failed #{trade_id}: {result.get('reason','')} ")
+                return False
             if price >= tp:
-                close_trade(position, price, "Take Profit hit"); return True
+                result = close_trade(position, price, "Take Profit hit")
+                if result.get("success"): return True
+                _log(f"CRITICAL: TP close failed #{trade_id}: {result.get('reason','')} ")
+                return False
         else:
             if price >= sl:
                 if position.get("trail_sl",False):
@@ -919,9 +963,15 @@ def manage_position(position: dict, price: float,
                     sl_reason = "Break-even stop hit"
                 else:
                     sl_reason = "Stop Loss hit"
-                close_trade(position, price, sl_reason); return True
+                result = close_trade(position, price, sl_reason)
+                if result.get("success"): return True
+                _log(f"CRITICAL: SELL SL close failed #{trade_id}: {result.get('reason','')}")
+                return False
             if price <= tp:
-                close_trade(position, price, "Take Profit hit"); return True
+                result = close_trade(position, price, "Take Profit hit")
+                if result.get("success"): return True
+                _log(f"CRITICAL: SELL TP close failed #{trade_id}: {result.get('reason','')}")
+                return False
 
         # ── Structure validity ────────────────────────────────────────────
         protected = (
@@ -937,8 +987,10 @@ def manage_position(position: dict, price: float,
                 reason = (f"Structure invalidated — "
                           f"{analysis.get('ms',{}).get('trend','')} reversed "
                           f"(P/L ${fl:+.2f})")
-                close_trade(position, price, reason)
-                return True
+                result = close_trade(position, price, reason)
+                if result.get("success"): return True
+                _log(f"CRITICAL: Structure close failed #{trade_id}: {result.get('reason','')} ")
+                return False
 
         # ── Timeout ───────────────────────────────────────────────────────
         try:
@@ -950,18 +1002,22 @@ def manage_position(position: dict, price: float,
             timeout_h  = get_timeout_hours(position)
 
             if hours_open >= MAX_HOLD_DAYS * 24:
-                close_trade(position, price,
-                            f"Max hold {MAX_HOLD_DAYS}d reached (${fl:.2f})")
-                return True
+                result = close_trade(position, price,
+                                      f"Max hold {MAX_HOLD_DAYS}d reached (${fl:.2f})")
+                if result.get("success"): return True
+                _log(f"CRITICAL: Max hold close failed #{trade_id}: {result.get('reason','')} ")
+                return False
             # Total P/L = realized partials + current remaining position
             total_trade_pl = float(position.get("realized_pl",0)) + current_pl
             total_r_now    = total_trade_pl / risk_1r if risk_1r > 0 else 0
             min_r_hold     = 0.3  # configurable: move to MIN_TIMEOUT_PROGRESS_R in config
             if hours_open >= timeout_h and total_r_now < min_r_hold:
-                close_trade(position, price,
-                            f"Timeout {hours_open:.1f}h no progress "
-                            f"({total_r_now:+.2f}R / ${total_trade_pl:.2f})")
-                return True
+                result = close_trade(position, price,
+                                      f"Timeout {hours_open:.1f}h no progress "
+                                      f"({total_r_now:+.2f}R / ${total_trade_pl:.2f})")
+                if result.get("success"): return True
+                _log(f"CRITICAL: Timeout close failed #{trade_id}: {result.get('reason','')} ")
+                return False
             if hours_open >= 48 and not position.get("partial_closed"):
                 close_trade(position, price,
                             f"48h timeout — freeing capital (${fl:.2f})")
@@ -1017,7 +1073,7 @@ def manage_position(position: dict, price: float,
                     "trade_id":  position.get("trade_id",""),
                     "symbol":    position["symbol"],
                     "new_sl":    be_sl,
-                    "old_sl":    sl,
+                    "old_sl":    old_sl,  # captured before sl=be_sl mutation
                     "profit_at": round(excursion_pl, 2),
                     "r_at_move": round(excursion_r, 3),
                     "timestamp": datetime.utcnow().isoformat(),
@@ -1036,6 +1092,8 @@ def manage_position(position: dict, price: float,
             cur_sl     = position["stop_loss"]
             if (side=="BUY" and lock_price > cur_sl) or \
                (side=="SELL" and lock_price < cur_sl):
+                _lock_sl_before  = position["stop_loss"]
+                _lock_pl_before  = position.get("profit_locked", False)
                 position["stop_loss"]    = lock_price
                 position["profit_locked"]= True
                 sl = lock_price  # refresh local sl
@@ -1045,6 +1103,10 @@ def manage_position(position: dict, price: float,
                         "profit_locked": True,
                     })
                 except Exception as _e:
+                    # Restore snapshot on DB failure
+                    position["stop_loss"]    = _lock_sl_before
+                    position["profit_locked"]= _lock_pl_before
+                    sl = _lock_sl_before
                     _log(f"CRITICAL: Lock state update failed: {_e} "
                          f"#{position.get('trade_id','')}")
                     return False
@@ -1092,6 +1154,8 @@ def manage_position(position: dict, price: float,
             if side == "BUY":
                 new_sl = round(price - trail_dist, 2)
                 if new_sl > position["stop_loss"]:
+                    _trail_sl_before   = position["stop_loss"]
+                    _trail_flag_before = position.get("trail_sl", False)
                     position["stop_loss"] = new_sl
                     position["trail_sl"]  = True
                     sl = new_sl  # refresh local sl
@@ -1101,21 +1165,31 @@ def manage_position(position: dict, price: float,
                             "trail_sl":  True,
                         })
                     except Exception as _e:
-                        _log(f"Trail SL update failed: {_e}")
+                        position["stop_loss"] = _trail_sl_before
+                        position["trail_sl"]  = _trail_flag_before
+                        sl = _trail_sl_before
+                        _log(f"CRITICAL: Trail SL update failed: {_e}")
+                        return False
                     _log(f"TRAIL SL→${new_sl:,.2f} #{position.get('trade_id','')}")
             else:
                 new_sl = round(price + trail_dist, 2)
                 if new_sl < position["stop_loss"]:
+                    _ts_before   = position["stop_loss"]
+                    _tf_before   = position.get("trail_sl", False)
                     position["stop_loss"] = new_sl
                     position["trail_sl"]  = True
-                    sl = new_sl  # refresh local sl
+                    sl = new_sl
                     try:
                         update_position_state(trade_id, {
                             "stop_loss": new_sl,
                             "trail_sl":  True,
                         })
                     except Exception as _e:
-                        _log(f"Trail SL update failed: {_e}")
+                        position["stop_loss"] = _ts_before
+                        position["trail_sl"]  = _tf_before
+                        sl = _ts_before
+                        _log(f"CRITICAL: SELL trail update failed: {_e}")
+                        return False
                     _log(f"TRAIL SL→${new_sl:,.2f} #{position.get('trade_id','')}")
 
         # Periodic MFE/MAE persist (every 5 scans to avoid DB overload)
