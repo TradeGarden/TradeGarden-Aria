@@ -12,6 +12,9 @@ Position sizing philosophy:
 """
 import os
 
+# Database
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
 VALID_SYMBOLS = ["BTCUSD", "ETHUSD"]
 KRAKEN_PAIRS  = {"BTCUSD": "XBTUSD", "ETHUSD": "ETHUSD"}
 TRADINGVIEW_SYMBOLS = {
