@@ -1104,5 +1104,32 @@ def save_closed_trade(trade: dict):
     print("[DB] WARNING: save_closed_trade() is deprecated.")
 
 
+def load_recent(limit: int = 100) -> list:
+    """Alias for load_journal with a limit — for journal.py compatibility."""
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM journal ORDER BY ts DESC LIMIT %s", (limit,)
+            )
+            result = []
+            for r in cur.fetchall():
+                d = dict(r)
+                try:
+                    if d.get("data") and d["data"] != "{}":
+                        d.update(json.loads(d["data"]))
+                except Exception:
+                    pass
+                if d.get("ts") and not isinstance(d["ts"], str):
+                    d["ts"] = d["ts"].isoformat()
+                result.append(d)
+            return result
+    except Exception as e:
+        print(f"[DB] load_recent error: {e}")
+        return []
+    finally:
+        conn.close()
+
+
 def load_positions_file() -> list:
     return get_open_positions()
