@@ -1029,7 +1029,7 @@ def load_closed_trades_today() -> list:
             # Closed trades today (final leg P/L only)
             cur.execute("""
                 SELECT trade_id, symbol, side, pl AS pl,
-                       total_pl, COALESCE(risk_1r,risk,0) AS risk_1r,
+                       COALESCE(total_pl, pl, 0) AS total_pl, COALESCE(risk_1r,risk,0) AS risk_1r,
                        exit_type, closed_at AS ts
                 FROM trade_history
                 WHERE closed_at >= DATE_TRUNC('day', NOW())
