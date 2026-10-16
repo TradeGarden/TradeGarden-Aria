@@ -921,5 +921,24 @@ def save_closed_trade(trade: dict):
     print("[DB] WARNING: save_closed_trade() is deprecated.")
 
 
+def recalc_equity(prices: dict = None) -> list:
+    """Return equity curve from trade history."""
+    try:
+        trades = load_closed_trades(365)
+        equity = []
+        balance = 500.0
+        for t in reversed(trades):
+            balance += float(t.get("pl", 0))
+            equity.append({
+                "ts":      t.get("closed_at",""),
+                "balance": round(balance, 2),
+                "trade_id":t.get("trade_id",""),
+            })
+        return equity
+    except Exception as e:
+        print(f"[DB] recalc_equity error: {e}")
+        return []
+
+
 def load_positions_file() -> list:
     return get_open_positions()
