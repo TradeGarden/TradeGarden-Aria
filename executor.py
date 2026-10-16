@@ -65,8 +65,10 @@ def save_position(position: dict):
 
 
 import threading
-_auto_thread  = None
-_auto_running = False
+_auto_thread     = None
+_auto_running    = False
+_last_scan_time  = "Never"
+_last_decision   = {}
 
 
 def _log(msg: str):
@@ -1294,6 +1296,8 @@ def _auto_loop():
                     tf_total = len(frames)
                     tf_ok    = sum(1 for f in frames if f.get("decision")==dec)
 
+                    _last_scan_time = datetime.utcnow().strftime("%H:%M:%S")
+                    _last_decision  = {"symbol": symbol, "decision": dec, "conf": conf}
                     _log(f"{symbol} → {dec} | Conf {conf}% | "
                          f"Trend {trend} ({sp}%) | "
                          f"{tf_ok}/{tf_total} TF agree | "
@@ -1339,6 +1343,8 @@ def stop_auto_trading():
 
 def get_auto_status() -> dict:
     return {
-        "running": _auto_running,
-        "thread":  _auto_thread.is_alive() if _auto_thread else False,
+        "running":   _auto_running,
+        "thread":    _auto_thread.is_alive() if _auto_thread else False,
+        "last_scan": _last_scan_time,
+        "last_decision": _last_decision,
     }
