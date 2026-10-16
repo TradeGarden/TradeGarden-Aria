@@ -496,8 +496,14 @@ async def dashboard(symbol: str = "BTCUSD"):
     tc_color = _tc(decision["trend"])
     cc_color = _cc(conf)
 
-    today_trades = todays_trade_count()
-    today_loss   = todays_loss_pct(balance)
+    try:
+        today_trades = todays_trade_count()
+    except Exception:
+        today_trades = 0
+    try:
+        today_loss = todays_loss_pct(balance)
+    except Exception:
+        today_loss = 0.0
     risk_usd     = round(balance * RISK_PER_TRADE_PCT / 100, 2)
 
     # ── Open positions block (up to 2) ──
@@ -1138,7 +1144,10 @@ async def execute_route(symbol: str = Query(...), side: str = Query(...)):
 @app.get("/close")
 async def close_route(symbol: str = "BTCUSD", trade_id: str = ""):
     from database import get_open_positions
-    positions = get_open_positions()
+    try:
+        positions = get_open_positions()
+    except Exception as e:
+        return HTMLResponse(f"<p>DB error: {e}</p>", status_code=500)
     if not positions:
         return HTMLResponse(
             "<html><body style='background:#090909;color:#d0d0d0;padding:30px'>"
@@ -1196,8 +1205,11 @@ async def api_analyze(symbol: str = "BTCUSD"):
 async def api_equity():
     """Called every 5 seconds by frontend - sums ALL open positions for equity."""
     from database import recalc_equity
-    account   = get_account()
-    positions = get_open_positions()
+    try:
+        account   = get_account()
+        positions = get_open_positions()
+    except Exception as e:
+        return {"error": str(e), "balance": 500.0, "equity": [], "positions": []}
     total_pl  = 0.0
     pos_data  = []
     prices    = {}
