@@ -192,7 +192,7 @@ def _topbar(symbol: str = "", active: str = "") -> str:
   </div>
   <div style="font-size:11px;color:#444">
     <span class="{dot_cls}"></span>{dot_lbl} ·
-    Last scan: {status['last_scan']} · {datetime.utcnow().strftime('%H:%M UTC')}
+    Last scan: {status.get('last_scan', 'Never')} · {datetime.utcnow().strftime('%H:%M UTC')}
   </div>
   <div class="sym-btns">
     <a href="/weekly"          class="sym-btn {acls('weekly')}">📊 Reports</a>
@@ -552,30 +552,30 @@ async def dashboard(symbol: str = "BTCUSD"):
       <h4>Market Structure</h4>
       <div class="explain">HH/HL = Bullish. LH/LL = Bearish. Sequence shows the last 5 swing points.</div>
       <div style="font-size:15px;color:{tc_color};font-weight:bold;margin-bottom:10px">
-        {analysis['ms']['sequence']}
+        {analysis.get('ms', {}) or {}['sequence']}
       </div>
       <div class="stat-grid">
-        <div class="stat"><div class="v">{analysis['ms']['structure']}</div><div class="l">Type</div></div>
-        <div class="stat"><div class="v" style="color:{tc_color}">{analysis['ms']['trend']}</div><div class="l">Trend</div></div>
-        <div class="stat"><div class="v">{analysis['ms']['strength_label']}</div><div class="l">Strength</div></div>
-        <div class="stat"><div class="v">{analysis['ms']['strength_pct']}%</div><div class="l">Strength %</div></div>
-        <div class="stat"><div class="v">${analysis['ms']['swing_high']:,.0f}</div><div class="l">Swing High</div></div>
-        <div class="stat"><div class="v">${analysis['ms']['swing_low']:,.0f}</div><div class="l">Swing Low</div></div>
+        <div class="stat"><div class="v">{analysis.get('ms', {}) or {}['structure']}</div><div class="l">Type</div></div>
+        <div class="stat"><div class="v" style="color:{tc_color}">{analysis.get('ms', {}) or {}['trend']}</div><div class="l">Trend</div></div>
+        <div class="stat"><div class="v">{analysis.get('ms', {}) or {}['strength_label']}</div><div class="l">Strength</div></div>
+        <div class="stat"><div class="v">{analysis.get('ms', {}) or {}['strength_pct']}%</div><div class="l">Strength %</div></div>
+        <div class="stat"><div class="v">${analysis.get('ms', {}) or {}['swing_high']:,.0f}</div><div class="l">Swing High</div></div>
+        <div class="stat"><div class="v">${analysis.get('ms', {}) or {}['swing_low']:,.0f}</div><div class="l">Swing Low</div></div>
       </div>
-      {"<div style='margin-top:8px;padding:7px;background:#0d2e1a;border-radius:6px;color:#2ecc71;font-size:12px'>✅ BOS - Break of Structure confirmed</div>" if analysis['ms']['bos'] else ""}
-      {"<div style='margin-top:8px;padding:7px;background:#2e1a0d;border-radius:6px;color:#f39c12;font-size:12px'>⚠️ CHoCH - Change of Character detected</div>" if analysis['ms']['choch'] else ""}
+      {"<div style='margin-top:8px;padding:7px;background:#0d2e1a;border-radius:6px;color:#2ecc71;font-size:12px'>✅ BOS - Break of Structure confirmed</div>" if analysis.get('ms', {}) or {}['bos'] else ""}
+      {"<div style='margin-top:8px;padding:7px;background:#2e1a0d;border-radius:6px;color:#f39c12;font-size:12px'>⚠️ CHoCH - Change of Character detected</div>" if analysis.get('ms', {}) or {}['choch'] else ""}
     </div>
 
     <div class="adv-card">
       <h4>EMA · RSI · MACD · ATR</h4>
       <div class="explain">EMA trend · RSI momentum · MACD crossover · ATR volatility</div>
       <div class="stat-grid">
-        <div class="stat"><div class="v">$(f"(f"(f"{analysis['ema20']:,.0f}" if analysis.get('ema20') else 'N/A')" if analysis.get('ema20') else 'N/A')" if analysis.get('ema20') else 'N/A')</div><div class="l">EMA 20</div></div>
-        <div class="stat"><div class="v">$(f"(f"(f"{analysis['ema50']:,.0f}" if analysis.get('ema50') else 'N/A')" if analysis.get('ema50') else 'N/A')" if analysis.get('ema50') else 'N/A')</div><div class="l">EMA 50</div></div>
-        <div class="stat"><div class="v" style="color:{'#e74c3c' if analysis['rsi_label']=='Overbought' else '#2ecc71' if analysis['rsi_label']=='Oversold' else '#888'}">{analysis['rsi14']}</div><div class="l">RSI · {analysis['rsi_label']}</div></div>
-        <div class="stat"><div class="v">{analysis['macd_line']:+.0f}</div><div class="l">MACD</div></div>
-        <div class="stat"><div class="v">{analysis['macd_signal']:+.0f}</div><div class="l">Signal</div></div>
-        <div class="stat"><div class="v">$(f"(f"{analysis['atr14']:,.0f}" if analysis.get('atr14') else 'N/A')" if analysis.get('atr14') else 'N/A')</div><div class="l">ATR 14</div></div>
+        <div class="stat"><div class="v">$(f"(f"(f"{analysis.get('ema20', 0) or 0:,.0f}" if analysis.get('ema20') else 'N/A')" if analysis.get('ema20') else 'N/A')" if analysis.get('ema20') else 'N/A')</div><div class="l">EMA 20</div></div>
+        <div class="stat"><div class="v">$(f"(f"(f"{analysis.get('ema50', 0) or 0:,.0f}" if analysis.get('ema50') else 'N/A')" if analysis.get('ema50') else 'N/A')" if analysis.get('ema50') else 'N/A')</div><div class="l">EMA 50</div></div>
+        <div class="stat"><div class="v" style="color:{'#e74c3c' if analysis.get('rsi_label','')=='Overbought' else '#2ecc71' if analysis.get('rsi_label','')=='Oversold' else '#888'}">{analysis.get('rsi14', 50) or 50}</div><div class="l">RSI · {analysis.get('rsi_label','')}</div></div>
+        <div class="stat"><div class="v">{analysis.get('macd_line', 0) or 0:+.0f}</div><div class="l">MACD</div></div>
+        <div class="stat"><div class="v">{analysis.get('macd_signal', 0) or 0:+.0f}</div><div class="l">Signal</div></div>
+        <div class="stat"><div class="v">$(f"(f"{analysis.get('atr14', 0) or 0:,.0f}" if analysis.get('atr14') else 'N/A')" if analysis.get('atr14') else 'N/A')</div><div class="l">ATR 14</div></div>
       </div>
     </div>
 
@@ -583,19 +583,19 @@ async def dashboard(symbol: str = "BTCUSD"):
       <h4>Volume</h4>
       <div class="explain">Confirms whether buyers or sellers support the move.</div>
       <div class="stat-grid">
-        <div class="stat"><div class="v">{analysis['vol']['current']:.1f}</div><div class="l">Current</div></div>
-        <div class="stat"><div class="v">{analysis['vol']['avg20']:.1f}</div><div class="l">20-Avg</div></div>
-        <div class="stat"><div class="v">x{analysis['vol']['relative']}</div><div class="l">Relative</div></div>
-        <div class="stat"><div class="v" style="color:#2ecc71">{analysis['vol']['buy_pressure']}%</div><div class="l">Buy</div></div>
-        <div class="stat"><div class="v" style="color:#e74c3c">{analysis['vol']['sell_pressure']}%</div><div class="l">Sell</div></div>
-        <div class="stat"><div class="v">{analysis['vol']['label']}</div><div class="l">Label</div></div>
+        <div class="stat"><div class="v">{analysis.get('vol', {}) or {}['current']:.1f}</div><div class="l">Current</div></div>
+        <div class="stat"><div class="v">{analysis.get('vol', {}) or {}['avg20']:.1f}</div><div class="l">20-Avg</div></div>
+        <div class="stat"><div class="v">x{analysis.get('vol', {}) or {}['relative']}</div><div class="l">Relative</div></div>
+        <div class="stat"><div class="v" style="color:#2ecc71">{analysis.get('vol', {}) or {}['buy_pressure']}%</div><div class="l">Buy</div></div>
+        <div class="stat"><div class="v" style="color:#e74c3c">{analysis.get('vol', {}) or {}['sell_pressure']}%</div><div class="l">Sell</div></div>
+        <div class="stat"><div class="v">{analysis.get('vol', {}) or {}['label']}</div><div class="l">Label</div></div>
       </div>
     </div>
 
     <div class="adv-card">
       <h4>Candlestick Pattern</h4>
       <div class="explain">Entry confirmation. High-reliability patterns carry more weight.</div>
-      {_patterns_html(analysis['patterns'])}
+      {_patterns_html(analysis.get('patterns', []))}
     </div>
 
     <div class="adv-card">
@@ -607,32 +607,32 @@ async def dashboard(symbol: str = "BTCUSD"):
     <div class="adv-card">
       <h4>Fair Value Gap (FVG)</h4>
       <div class="explain">Price often returns to these areas before continuing.</div>
-      {_fvg_html(analysis['fvgs'])}
+      {_fvg_html(analysis.get('fvgs', []) or [])}
     </div>
 
     <div class="adv-card">
       <h4>Liquidity</h4>
       <div class="explain">BSL = stops above highs. SSL = stops below lows.</div>
-      {_liq_html(analysis['liq'])}
+      {_liq_html(analysis.get('liq', {}) or {})}
     </div>
 
     <div class="adv-card">
-      <h4>Multi-Timeframe · {analysis['bias']}</h4>
+      <h4>Multi-Timeframe · {analysis.get('bias', '')}</h4>
       <div class="explain">Daily → 4H → 1H → 15m. 2+ aligned required to trade.</div>
-      {_tf_rows(analysis['frames'])}
+      {_tf_rows(analysis.get('frames', []) or [])}
     </div>
 
     <div class="adv-card">
       <h4>Confidence Breakdown</h4>
       <div class="explain">5 indicators · max 100 pts · min {MIN_CONFIDENCE}% to trade · MACD removed</div>
-      {_conf_breakdown(decision['confidence'])}
+      {_conf_breakdown(decision.get('confidence', {}) or {})}
     </div>
 
     <div class="adv-card" style="grid-column:1/-1">
       <h4>AI Reasoning</h4>
       <div class="explain">Aria's full narrative analysis of the current setup.</div>
       <div style="font-size:13px;line-height:1.9;color:#bbb;white-space:pre-wrap;margin-top:8px">
-        {decision['narrative']}
+        {decision.get('narrative', '')}
       </div>
     </div>
 
@@ -678,18 +678,18 @@ async def dashboard(symbol: str = "BTCUSD"):
 
   <div class="card">
     <div class="card-title">Trend &amp; Structure</div>
-    <div style="color:{tc_color};font-size:16px;font-weight:bold">{decision['trend']}</div>
+    <div style="color:{tc_color};font-size:16px;font-weight:bold">{decision.get('trend', '')}</div>
     <div style="color:{tc_color};font-size:13px;opacity:.7;margin-top:3px">
-      {analysis['ms']['sequence']}
+      {analysis.get('ms', {}) or {}['sequence']}
     </div>
     <div style="color:#333;font-size:11px;margin-top:3px">
-      {analysis['ms']['strength_label']} · {analysis['ms']['strength_pct']}%
+      {analysis.get('ms', {}) or {}['strength_label']} · {analysis.get('ms', {}) or {}['strength_pct']}%
     </div>
   </div>
 
   <div class="card">
     <div class="card-title">Reason</div>
-    <ul class="reason-list">{_reasons(decision['reasons'])}</ul>
+    <ul class="reason-list">{_reasons(decision.get('reasons', []) or [])}</ul>
   </div>
 
   <div class="card">
