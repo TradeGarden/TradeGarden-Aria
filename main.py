@@ -475,7 +475,7 @@ async def dashboard(symbol: str = "BTCUSD"):
         analysis = analyze(scan_data)
         decision = decide(analysis)
         account        = get_account()
-        balance        = float(account['balance'])
+        balance        = float(account.get('balance', 500) or 500)
         open_positions = get_open_positions()
         # Intelligence available at /intelligence page
     except Exception as e:
@@ -601,7 +601,7 @@ async def dashboard(symbol: str = "BTCUSD"):
     <div class="adv-card">
       <h4>Support &amp; Resistance</h4>
       <div class="explain">More touches = stronger level.</div>
-      {_levels_html(analysis['levels'])}
+      {_levels_html(analysis.get('levels', {}))}
     </div>
 
     <div class="adv-card">
@@ -696,9 +696,9 @@ async def dashboard(symbol: str = "BTCUSD"):
     <div class="card-title">Trade Levels</div>
     <div class="stat-grid">
       <div class="stat"><div class="v">${price:,.2f}</div><div class="l">Entry</div></div>
-      <div class="stat"><div class="v" style="color:#e74c3c">${levels['stop_loss']:,.2f}</div><div class="l">Stop Loss</div></div>
-      <div class="stat"><div class="v" style="color:#2ecc71">${levels['take_profit']:,.2f}</div><div class="l">Take Profit</div></div>
-      <div class="stat"><div class="v">1:{levels['rr']}</div><div class="l">R/R</div></div>
+      <div class="stat"><div class="v" style="color:#e74c3c">${levels.get('stop_loss', 0) or 0:,.2f}</div><div class="l">Stop Loss</div></div>
+      <div class="stat"><div class="v" style="color:#2ecc71">${levels.get('take_profit', 0) or 0:,.2f}</div><div class="l">Take Profit</div></div>
+      <div class="stat"><div class="v">1:{levels.get('rr', 0) or 0}</div><div class="l">R/R</div></div>
       <div class="stat"><div class="v">${risk_usd:.2f}</div><div class="l">Risk (1%)</div></div>
       <div class="stat"><div class="v">${balance:,.2f}</div><div class="l">Balance</div></div>
       <div class="stat"><div class="v" id="live-equity" style="color:#2ecc71">${float(account['equity']):,.2f}</div><div class="l">Equity</div></div>
@@ -1135,7 +1135,7 @@ async def execute_route(symbol: str = Query(...), side: str = Query(...)):
         return HTMLResponse(
             f"<html><body style='background:#090909;color:#d0d0d0;font-family:Arial;padding:30px'>"
             f"<h2 style='color:#f39c12'>⚠️ Trade Rejected</h2>"
-            f"<p style='margin-top:10px;color:#666'>{result['reason']}</p>"
+            f"<p style='margin-top:10px;color:#666'>{result.get('reason', '')}</p>"
             f"<a href='/analyze?symbol={symbol}' style='color:#444;display:block;margin-top:20px'>← Back</a>"
             f"</body></html>"
         )
@@ -1166,9 +1166,9 @@ async def close_route(symbol: str = "BTCUSD", trade_id: str = ""):
     return HTMLResponse(
         f"<html><body style='background:#090909;color:#d0d0d0;font-family:Arial;padding:30px'>"
         f"<h2>✅ Position Closed</h2>"
-        f"<p style='margin-top:10px'>P/L: <b style='color:{color}'>${result['pl']:,.2f}</b></p>"
-        f"<p style='color:#444'>New Balance: ${result['new_balance']:,.2f} · "
-        f"Duration: {result['duration']}</p>"
+        f"<p style='margin-top:10px'>P/L: <b style='color:{color}'>${result.get('pl', 0) or 0:,.2f}</b></p>"
+        f"<p style='color:#444'>New Balance: ${result.get('new_balance', 0) or 0:,.2f} · "
+        f"Duration: {result.get('duration', '')}</p>"
         f"<a href='/analyze?symbol={sym}' style='color:#444;display:block;margin-top:20px'>← Back</a>"
         f"</body></html>"
     )
