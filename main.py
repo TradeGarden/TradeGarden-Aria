@@ -271,10 +271,10 @@ def _patterns_html(patterns):
             f"<div style='padding:8px;background:#0d0d0d;border-radius:6px;"
             f"border-left:3px solid {c};margin-bottom:6px'>"
             f"<div style='display:flex;align-items:center'>"
-            f"<span style='color:{c};font-weight:bold;font-size:13px'>{p['name']}</span>"
+            f"<span style='color:{c};font-weight:bold;font-size:13px'>{p.get('name','')}</span>"
             f"{tf_badge}</div>"
             f"<div style='font-size:11px;color:#444;margin-top:3px'>"
-            f"{p['direction']} · {p['strength']} · Reliability: {p['reliability']}</div></div>"
+            f"{p.get('direction','')} · {p.get('strength','')} · Strength: {p.get('strength','')}</div></div>"
         )
     return out
 
