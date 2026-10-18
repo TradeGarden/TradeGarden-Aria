@@ -73,7 +73,7 @@ async def lifespan(app: FastAPI):
     try:
         stop_auto_trading()
     except Exception as _e:
-        print(f"[ARIA] {fname} error: {_e}")
+        print(f"[ARIA] shutdown error: {_e}")
 
 
 app = FastAPI(title="Aria AI Trading Engine", lifespan=lifespan)
@@ -552,30 +552,30 @@ async def dashboard(symbol: str = "BTCUSD"):
       <h4>Market Structure</h4>
       <div class="explain">HH/HL = Bullish. LH/LL = Bearish. Sequence shows the last 5 swing points.</div>
       <div style="font-size:15px;color:{tc_color};font-weight:bold;margin-bottom:10px">
-        {analysis.get('ms', {}) or {}['sequence']}
+        {ms.get('sequence', '')}
       </div>
       <div class="stat-grid">
-        <div class="stat"><div class="v">{analysis.get('ms', {}) or {}['structure']}</div><div class="l">Type</div></div>
-        <div class="stat"><div class="v" style="color:{tc_color}">{analysis.get('ms', {}) or {}['trend']}</div><div class="l">Trend</div></div>
-        <div class="stat"><div class="v">{analysis.get('ms', {}) or {}['strength_label']}</div><div class="l">Strength</div></div>
-        <div class="stat"><div class="v">{analysis.get('ms', {}) or {}['strength_pct']}%</div><div class="l">Strength %</div></div>
-        <div class="stat"><div class="v">${analysis.get('ms', {}) or {}['swing_high']:,.0f}</div><div class="l">Swing High</div></div>
-        <div class="stat"><div class="v">${analysis.get('ms', {}) or {}['swing_low']:,.0f}</div><div class="l">Swing Low</div></div>
+        <div class="stat"><div class="v">{ms.get('structure', '')}</div><div class="l">Type</div></div>
+        <div class="stat"><div class="v" style="color:{tc_color}">{ms.get('trend', 'Neutral')}</div><div class="l">Trend</div></div>
+        <div class="stat"><div class="v">{ms.get('strength_label', '')}</div><div class="l">Strength</div></div>
+        <div class="stat"><div class="v">{ms.get('strength_pct', 0)}%</div><div class="l">Strength %</div></div>
+        <div class="stat"><div class="v">${ms.get('swing_high', 0):,.0f}</div><div class="l">Swing High</div></div>
+        <div class="stat"><div class="v">${ms.get('swing_low', 0):,.0f}</div><div class="l">Swing Low</div></div>
       </div>
-      {"<div style='margin-top:8px;padding:7px;background:#0d2e1a;border-radius:6px;color:#2ecc71;font-size:12px'>✅ BOS - Break of Structure confirmed</div>" if analysis.get('ms', {}) or {}['bos'] else ""}
-      {"<div style='margin-top:8px;padding:7px;background:#2e1a0d;border-radius:6px;color:#f39c12;font-size:12px'>⚠️ CHoCH - Change of Character detected</div>" if analysis.get('ms', {}) or {}['choch'] else ""}
+      {"<div style='margin-top:8px;padding:7px;background:#0d2e1a;border-radius:6px;color:#2ecc71;font-size:12px'>✅ BOS - Break of Structure confirmed</div>" if ms.get('bos', False) else ""}
+      {"<div style='margin-top:8px;padding:7px;background:#2e1a0d;border-radius:6px;color:#f39c12;font-size:12px'>⚠️ CHoCH - Change of Character detected</div>" if ms.get('choch', False) else ""}
     </div>
 
     <div class="adv-card">
       <h4>EMA · RSI · MACD · ATR</h4>
       <div class="explain">EMA trend · RSI momentum · MACD crossover · ATR volatility</div>
       <div class="stat-grid">
-        <div class="stat"><div class="v">$(f"(f"(f"{analysis.get('ema20', 0) or 0:,.0f}" if analysis.get('ema20') else 'N/A')" if analysis.get('ema20') else 'N/A')" if analysis.get('ema20') else 'N/A')</div><div class="l">EMA 20</div></div>
-        <div class="stat"><div class="v">$(f"(f"(f"{analysis.get('ema50', 0) or 0:,.0f}" if analysis.get('ema50') else 'N/A')" if analysis.get('ema50') else 'N/A')" if analysis.get('ema50') else 'N/A')</div><div class="l">EMA 50</div></div>
+        <div class="stat"><div class="v">${f"{analysis.get('ema20', 0) or 0:,.0f}" if analysis.get('ema20') else 'N/A'}</div><div class="l">EMA 20</div></div>
+        <div class="stat"><div class="v">${f"{analysis.get('ema50', 0) or 0:,.0f}" if analysis.get('ema50') else 'N/A'}</div><div class="l">EMA 50</div></div>
         <div class="stat"><div class="v" style="color:{'#e74c3c' if analysis.get('rsi_label','')=='Overbought' else '#2ecc71' if analysis.get('rsi_label','')=='Oversold' else '#888'}">{analysis.get('rsi14', 50) or 50}</div><div class="l">RSI · {analysis.get('rsi_label','')}</div></div>
         <div class="stat"><div class="v">{analysis.get('macd_line', 0) or 0:+.0f}</div><div class="l">MACD</div></div>
         <div class="stat"><div class="v">{analysis.get('macd_signal', 0) or 0:+.0f}</div><div class="l">Signal</div></div>
-        <div class="stat"><div class="v">$(f"(f"{analysis.get('atr14', 0) or 0:,.0f}" if analysis.get('atr14') else 'N/A')" if analysis.get('atr14') else 'N/A')</div><div class="l">ATR 14</div></div>
+        <div class="stat"><div class="v">${f"{analysis.get('atr14', 0) or 0:,.2f}" if analysis.get('atr14') else 'N/A'}</div><div class="l">ATR 14</div></div>
       </div>
     </div>
 
@@ -583,12 +583,12 @@ async def dashboard(symbol: str = "BTCUSD"):
       <h4>Volume</h4>
       <div class="explain">Confirms whether buyers or sellers support the move.</div>
       <div class="stat-grid">
-        <div class="stat"><div class="v">{analysis.get('vol', {}) or {}['current']:.1f}</div><div class="l">Current</div></div>
-        <div class="stat"><div class="v">{analysis.get('vol', {}) or {}['avg20']:.1f}</div><div class="l">20-Avg</div></div>
-        <div class="stat"><div class="v">x{analysis.get('vol', {}) or {}['relative']}</div><div class="l">Relative</div></div>
-        <div class="stat"><div class="v" style="color:#2ecc71">{analysis.get('vol', {}) or {}['buy_pressure']}%</div><div class="l">Buy</div></div>
-        <div class="stat"><div class="v" style="color:#e74c3c">{analysis.get('vol', {}) or {}['sell_pressure']}%</div><div class="l">Sell</div></div>
-        <div class="stat"><div class="v">{analysis.get('vol', {}) or {}['label']}</div><div class="l">Label</div></div>
+        <div class="stat"><div class="v">{vol.get('current', 0):.1f}</div><div class="l">Current</div></div>
+        <div class="stat"><div class="v">{vol.get('avg20', 0):.1f}</div><div class="l">20-Avg</div></div>
+        <div class="stat"><div class="v">x{vol.get('relative', 1)}</div><div class="l">Relative</div></div>
+        <div class="stat"><div class="v" style="color:#2ecc71">{vol.get('buy_pressure', 50)}%</div><div class="l">Buy</div></div>
+        <div class="stat"><div class="v" style="color:#e74c3c">{vol.get('sell_pressure', 50)}%</div><div class="l">Sell</div></div>
+        <div class="stat"><div class="v">{vol.get('label', '')}</div><div class="l">Label</div></div>
       </div>
     </div>
 
@@ -680,10 +680,10 @@ async def dashboard(symbol: str = "BTCUSD"):
     <div class="card-title">Trend &amp; Structure</div>
     <div style="color:{tc_color};font-size:16px;font-weight:bold">{decision.get('trend', '')}</div>
     <div style="color:{tc_color};font-size:13px;opacity:.7;margin-top:3px">
-      {analysis.get('ms', {}) or {}['sequence']}
+      {ms.get('sequence', '')}
     </div>
     <div style="color:#333;font-size:11px;margin-top:3px">
-      {analysis.get('ms', {}) or {}['strength_label']} · {analysis.get('ms', {}) or {}['strength_pct']}%
+      {ms.get('strength_label', '')} · {ms.get('strength_pct', 0)}%
     </div>
   </div>
 
@@ -1116,6 +1116,9 @@ async def execute_route(symbol: str = Query(...), side: str = Query(...)):
         )
     scan_data = scan(symbol)
     analysis  = analyze(scan_data)
+    ms        = analysis.get('ms',  {}) or {}
+    vol       = analysis.get('vol', {}) or {}
+    frames    = analysis.get('frames', []) or []
     decision  = decide(analysis)
     result    = open_trade(symbol, side, analysis, decision)
 
