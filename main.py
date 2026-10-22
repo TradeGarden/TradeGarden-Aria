@@ -238,10 +238,10 @@ def _tf_rows(frames):
         sc  = "#2ecc71" if f["decision"]=="BUY" else ("#e74c3c" if f["decision"]=="SELL" else "#444")
         tc2 = _tc(f["trend"]) if f["trend"] in ("Bullish","Bearish") else "#444"
         out += (f"<div class='tf-row'>"
-                f"<span style='color:#555;width:45px'>{f['label']}</span>"
-                f"<span style='color:{sc};font-weight:bold;width:48px'>{f['decision']}</span>"
-                f"<span style='color:{tc2};font-size:12px'>{f['structure']}</span>"
-                f"<span style='color:#333;font-size:11px'>RSI {f['rsi']}</span></div>")
+                f"<span style='color:#555;width:45px'>{f.get('label', '')}</span>"
+                f"<span style='color:{sc};font-weight:bold;width:48px'>{f.get('decision', 'WAIT')}</span>"
+                f"<span style='color:{tc2};font-size:12px'>{f.get('structure', '')}</span>"
+                f"<span style='color:#333;font-size:11px'>RSI {f.get('rsi', 50) or 50}</span></div>")
     return out
 
 def _patterns_html(patterns):
@@ -285,9 +285,9 @@ def _fvg_html(fvgs):
     for g in reversed(fvgs):
         c = "#2ecc71" if g["type"]=="Bullish" else "#e74c3c"
         out += (f"<div style='padding:6px 0;border-bottom:1px solid #141414'>"
-                f"<span style='color:{c};font-weight:bold'>{g['type']} FVG</span>"
+                f"<span style='color:{c};font-weight:bold'>{g.get('type', '')} FVG</span>"
                 f"<span style='color:#555;font-size:12px;margin-left:8px'>"
-                f"${g['low']:,.2f} – ${g['high']:,.2f}</span></div>")
+                f"${g.get('low', 0) or 0:,.2f} – ${g.get('high', 0) or 0:,.2f}</span></div>")
     return out
 
 def _liq_html(liq):
@@ -509,10 +509,10 @@ async def dashboard(symbol: str = "BTCUSD"):
     # ── Open positions block (up to 2) ──
     pos_block = ""
     for pos in open_positions:
-        p_entry = pos["entry_price"]
-        p_size  = pos["size"]
-        p_side  = pos["side"]
-        p_sym   = pos["symbol"]
+        p_entry = pos.get("entry_price", "")
+        p_size  = pos.get("size", "")
+        p_side  = pos.get("side", "")
+        p_sym   = pos.get("symbol", "")
         p_pl    = (price-p_entry)*p_size if p_side=="BUY" else (p_entry-price)*p_size
         p_pl    = round(p_pl, 2)
         p_col   = "#2ecc71" if p_pl >= 0 else "#e74c3c"
@@ -523,7 +523,7 @@ async def dashboard(symbol: str = "BTCUSD"):
             f"<span style='font-weight:bold;color:#fff'>{p_side} {p_size} {p_sym[:3]}</span>"
             f"<span style='color:#444;font-size:11px'>#{tid}</span></div>"
             f"<div style='margin-top:5px;font-size:12px;color:#555'>"
-            f"Entry ${p_entry:,.2f} · SL ${pos['stop_loss']:,.2f} · TP ${pos['take_profit']:,.2f}</div>"
+            f"Entry ${p_entry:,.2f} · SL ${pos.get('stop_loss', 0) or 0:,.2f} · TP ${pos.get('take_profit', 0) or 0:,.2f}</div>"
             f"<div id='live-pl-{tid}' style='color:{p_col};font-size:18px;font-weight:bold;margin-top:6px'>"
             f"P/L: ${p_pl:,.2f}</div>"
             f"<a href='/close?symbol={p_sym}&trade_id={tid}' class='btn btn-close' "
@@ -559,8 +559,8 @@ async def dashboard(symbol: str = "BTCUSD"):
         <div class="stat"><div class="v" style="color:{tc_color}">{ms.get('trend', 'Neutral')}</div><div class="l">Trend</div></div>
         <div class="stat"><div class="v">{ms.get('strength_label', '')}</div><div class="l">Strength</div></div>
         <div class="stat"><div class="v">{ms.get('strength_pct', 0)}%</div><div class="l">Strength %</div></div>
-        <div class="stat"><div class="v">${ms.get('swing_high', 0):,.0f}</div><div class="l">Swing High</div></div>
-        <div class="stat"><div class="v">${ms.get('swing_low', 0):,.0f}</div><div class="l">Swing Low</div></div>
+        <div class="stat"><div class="v">${ms.get('swing_high') or 0:,.0f}</div><div class="l">Swing High</div></div>
+        <div class="stat"><div class="v">${ms.get('swing_low') or 0:,.0f}</div><div class="l">Swing Low</div></div>
       </div>
       {"<div style='margin-top:8px;padding:7px;background:#0d2e1a;border-radius:6px;color:#2ecc71;font-size:12px'>✅ BOS - Break of Structure confirmed</div>" if ms.get('bos', False) else ""}
       {"<div style='margin-top:8px;padding:7px;background:#2e1a0d;border-radius:6px;color:#f39c12;font-size:12px'>⚠️ CHoCH - Change of Character detected</div>" if ms.get('choch', False) else ""}
@@ -701,7 +701,7 @@ async def dashboard(symbol: str = "BTCUSD"):
       <div class="stat"><div class="v">1:{levels.get('rr', 0) or 0}</div><div class="l">R/R</div></div>
       <div class="stat"><div class="v">${risk_usd:.2f}</div><div class="l">Risk (1%)</div></div>
       <div class="stat"><div class="v">${balance:,.2f}</div><div class="l">Balance</div></div>
-      <div class="stat"><div class="v" id="live-equity" style="color:#2ecc71">${float(account['equity']):,.2f}</div><div class="l">Equity</div></div>
+      <div class="stat"><div class="v" id="live-equity" style="color:#2ecc71">${float(account.get('equity', [])):,.2f}</div><div class="l">Equity</div></div>
     </div>
   </div>
 
@@ -798,12 +798,12 @@ async def reports_page():
     pos_html = ""
     for pos in open_pos:
         try:
-            cur = _get_price(pos["symbol"])
+            cur = _get_price(pos.get("symbol", ""))
         except Exception:
-            cur = pos["entry_price"]
-        fl   = round(((cur - pos["entry_price"]) * pos["size"]
-                      if pos["side"] == "BUY"
-                      else (pos["entry_price"] - cur) * pos["size"]), 2)
+            cur = pos.get("entry_price", "")
+        fl   = round(((cur - pos.get("entry_price", "")) * pos.get("size", "")
+                      if pos.get("side", "") == "BUY"
+                      else (pos.get("entry_price", "") - cur) * pos.get("size", "")), 2)
         pl_c = "#2ecc71" if fl >= 0 else "#e74c3c"
         be   = " · ✅ RISK FREE" if pos.get("be_moved") else ""
         lk   = " · 🔒 $2.50 LOCKED" if pos.get("profit_locked") else ""
@@ -815,14 +815,14 @@ async def reports_page():
             f"<div style='display:flex;justify-content:space-between;"
             f"align-items:center;margin-bottom:8px'>"
             f"<span style='font-weight:bold;color:#fff;font-size:15px'>"
-            f"{pos['side']} {pos['symbol']}</span>"
+            f"{pos.get('side', '')} {pos.get('symbol', '')}</span>"
             f"<span style='color:{pl_c};font-size:20px;font-weight:bold'>"
             f"${fl:+,.2f}</span></div>"
             f"<div style='font-size:12px;color:#555;line-height:2'>"
-            f"Entry: ${pos['entry_price']:,.2f} &nbsp;|&nbsp; "
-            f"SL: <span style='color:#e74c3c'>${pos['stop_loss']:,.2f}</span>"
+            f"Entry: ${pos.get('entry_price', 0) or 0:,.2f} &nbsp;|&nbsp; "
+            f"SL: <span style='color:#e74c3c'>${pos.get('stop_loss', 0) or 0:,.2f}</span>"
             f" &nbsp;|&nbsp; "
-            f"TP: <span style='color:#2ecc71'>${pos['take_profit']:,.2f}</span><br>"
+            f"TP: <span style='color:#2ecc71'>${pos.get('take_profit', 0) or 0:,.2f}</span><br>"
             f"Risk: ${pos.get('risk_amount',0):.2f} &nbsp;|&nbsp; "
             f"R:R 1:{pos.get('rr',0)} &nbsp;|&nbsp; "
             f"Opened: {ts}"
@@ -1127,10 +1127,10 @@ async def execute_route(symbol: str = Query(...), side: str = Query(...)):
         color = "#2ecc71" if side == "BUY" else "#e74c3c"
         return HTMLResponse(
             f"<html><body style='background:#090909;color:#d0d0d0;font-family:Arial;padding:30px'>"
-            f"<h2 style='color:{color}'>✅ Trade Executed - #{pos['trade_id']}</h2>"
-            f"<p style='margin-top:10px'>{side} {pos['size']} {symbol} @ ${pos['entry_price']:,.2f}</p>"
+            f"<h2 style='color:{color}'>✅ Trade Executed - #{pos.get('trade_id', '')}</h2>"
+            f"<p style='margin-top:10px'>{side} {pos.get('size', 0) or 0} {symbol} @ ${pos.get('entry_price', 0) or 0:,.2f}</p>"
             f"<p style='color:#444;margin-top:4px'>"
-            f"SL ${pos['stop_loss']:,.2f} · TP ${pos['take_profit']:,.2f} · Risk ${pos['risk_amount']:.2f}</p>"
+            f"SL ${pos.get('stop_loss', 0) or 0:,.2f} · TP ${pos.get('take_profit', 0) or 0:,.2f} · Risk ${pos.get('risk_amount', 0) or 0:.2f}</p>"
             f"<a href='/analyze?symbol={symbol}' style='color:#444;display:block;margin-top:20px'>← Back</a>"
             f"</body></html>"
         )
@@ -1217,13 +1217,13 @@ async def api_equity():
     pos_data  = []
     prices    = {}
     for pos in positions:
-        sym = pos["symbol"]
+        sym = pos.get("symbol", "")
         if sym not in prices:
             prices[sym] = fetch_current_price(sym)
         p     = prices[sym]
-        entry = pos["entry_price"]
-        size  = pos["size"]
-        side  = pos["side"]
+        entry = pos.get("entry_price", "")
+        size  = pos.get("size", "")
+        side  = pos.get("side", "")
         fl    = (p-entry)*size if side=="BUY" else (entry-p)*size
         fl    = round(fl, 2)
         total_pl += fl
