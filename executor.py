@@ -1313,7 +1313,7 @@ def _auto_loop():
                         if result.get("success"):
                             balance = fresh_balance
                         elif result.get("reason"):
-                            _log(f"{symbol} blocked: {result['reason']}")
+                            _log(f"{symbol} blocked: {result.get('reason', '')}")
 
                 except Exception as _e:
                     _log(f"Auto loop {symbol} error: {_e}")
