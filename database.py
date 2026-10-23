@@ -200,22 +200,32 @@ def setup_database():
                 "CREATE INDEX IF NOT EXISTS idx_pos_sym     ON positions(symbol,status)",
                 "CREATE INDEX IF NOT EXISTS idx_hist_closed ON trade_history(closed_at DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_pce_trade   ON partial_close_events(trade_id)",
-                "CREATE INDEX IF NOT EXISTS idx_jnl_ts ON journal(ts DESC)",  # may fail on old schema — handled below
+                # idx_jnl_ts — created after ts column migration  # may fail on old schema — handled below
                 """CREATE UNIQUE INDEX IF NOT EXISTS idx_one_open_per_symbol
                    ON positions(symbol) WHERE status='OPEN'""",
             ]:
                 cur.execute(stmt)
 
             # Migrations
-            # Ensure journal has 'ts' column (old DBs may use 'created_at')
+            # Ensure journal has 'ts' column
             try:
                 cur.execute("SELECT ts FROM journal LIMIT 0")
             except Exception:
                 try:
-                    cur.execute("ALTER TABLE journal ADD COLUMN IF NOT EXISTS ts TIMESTAMPTZ DEFAULT NOW()")
-                    print("[DB] migrated journal.ts")
-                except Exception as _e2:
-                    print(f"[DB] journal.ts migration warning: {_e2}")
+                    # Try renaming created_at → ts first
+                    cur.execute("ALTER TABLE journal RENAME COLUMN created_at TO ts")
+                    print("[DB] renamed journal.created_at → ts")
+                except Exception:
+                    try:
+                        cur.execute("ALTER TABLE journal ADD COLUMN ts TIMESTAMPTZ DEFAULT NOW()")
+                        print("[DB] added journal.ts column")
+                    except Exception as _e2:
+                        print(f"[DB] journal.ts warning: {_e2}")
+            # Create ts index after ensuring column exists
+            try:
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_jnl_ts ON journal(ts DESC)")
+            except Exception as _ei:
+                print(f"[DB] journal ts index warning: {_ei}")
 
             _migrate(cur, "positions", [
                 ("initial_size",       "NUMERIC(16,8) NOT NULL DEFAULT 0"),
