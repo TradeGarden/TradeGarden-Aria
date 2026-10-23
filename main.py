@@ -63,7 +63,13 @@ async def lifespan(app: FastAPI):
         setup_database()
         print("[Aria] Database ready")
     except Exception as e:
-        print(f"[Aria] DB setup error: {e} — continuing without DB")
+        print(f"[Aria] DB setup error: {e}")
+        # Retry once — ts column migration may need a fresh connection
+        try:
+            setup_database()
+            print("[Aria] Database ready (retry)")
+        except Exception as e2:
+            print(f"[Aria] DB still failing: {e2} — trading without persistence")
     try:
         start_auto_trading()
         print("[Aria] Auto-trading started")
@@ -659,7 +665,7 @@ async def dashboard(symbol: str = "BTCUSD"):
   {_aria_status_card()}
 
   <div class="card">
-    <div class="card-title">Current Price · {scan_data['session']} Session</div>
+    <div class="card-title">Current Price · {scan_data.get('session', '')} Session</div>
     <div style="font-size:26px;font-weight:bold;color:#fff">${price:,.2f}</div>
   </div>
 
