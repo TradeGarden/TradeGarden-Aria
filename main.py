@@ -468,7 +468,7 @@ async def dashboard(symbol: str = "BTCUSD"):
             f"</body></html>"
         )
 
-    if not scan_data["candles"]:
+    if not scan_data.get("candles", []):
         return HTMLResponse(
             f"<html><body style='background:#090909;color:#e74c3c;"
             f"font-family:Arial;padding:30px'>"
@@ -478,7 +478,36 @@ async def dashboard(symbol: str = "BTCUSD"):
         )
 
     try:
-        analysis = analyze(scan_data)
+        analysis  = analyze(scan_data)
+        ms        = analysis.get("ms",  {}) or {}
+        vol       = analysis.get("vol", {}) or {}
+        frames    = analysis.get("frames", []) or []
+        levels    = analysis.get("levels", {}) or {}
+        patterns  = analysis.get("patterns", []) or []
+        fvgs      = analysis.get("fvgs", []) or []
+        liq_data  = analysis.get("liq", {}) or {}
+        price     = analysis.get("price", 0) or 0
+        atr       = analysis.get("atr14", 0) or 0
+        rsi       = analysis.get("rsi14", 50) or 50
+        ema20     = analysis.get("ema20", 0) or 0
+        ema50     = analysis.get("ema50", 0) or 0
+        decision  = decide(analysis)
+        dec       = decision.get("decision", "WAIT")
+        conf      = decision.get("confidence", {}) or {}
+        conf_pct  = conf.get("total", 0) if isinstance(conf, dict) else int(conf or 0)
+        reason    = decision.get("reason", "")
+        narrative = decision.get("narrative", "")
+        d_levels  = decision.get("levels", {}) or {}
+        trend     = ms.get("trend", "Neutral")
+        strength  = ms.get("strength_pct", 0) or 0
+        sequence  = ms.get("sequence", "")
+        swing_h   = ms.get("swing_high", 0) or 0
+        swing_l   = ms.get("swing_low", 0) or 0
+        bos       = ms.get("bos", False)
+        choch     = ms.get("choch", False)
+        vol_rel   = vol.get("relative", 1) or 1
+        vol_label = vol.get("label", "")
+        status    = get_auto_status()
         decision = decide(analysis)
         account        = get_account()
         balance        = float(account.get('balance', 500) or 500)
@@ -495,7 +524,7 @@ async def dashboard(symbol: str = "BTCUSD"):
             f"</body></html>"
         )
     position       = open_positions[0] if open_positions else None
-    price    = scan_data["price"]
+    price    = scan_data.get("price", 0) or 0
     dec      = decision["decision"]
     conf     = decision["confidence"]["total"]
     levels   = decision["levels"]
@@ -558,13 +587,13 @@ async def dashboard(symbol: str = "BTCUSD"):
       <h4>Market Structure</h4>
       <div class="explain">HH/HL = Bullish. LH/LL = Bearish. Sequence shows the last 5 swing points.</div>
       <div style="font-size:15px;color:{tc_color};font-weight:bold;margin-bottom:10px">
-        {ms.get('sequence', '')}
+        {sequence}
       </div>
       <div class="stat-grid">
         <div class="stat"><div class="v">{ms.get('structure', '')}</div><div class="l">Type</div></div>
-        <div class="stat"><div class="v" style="color:{tc_color}">{ms.get('trend', 'Neutral')}</div><div class="l">Trend</div></div>
+        <div class="stat"><div class="v" style="color:{tc_color}">{trend}</div><div class="l">Trend</div></div>
         <div class="stat"><div class="v">{ms.get('strength_label', '')}</div><div class="l">Strength</div></div>
-        <div class="stat"><div class="v">{ms.get('strength_pct', 0)}%</div><div class="l">Strength %</div></div>
+        <div class="stat"><div class="v">{strength}%</div><div class="l">Strength %</div></div>
         <div class="stat"><div class="v">${ms.get('swing_high') or 0:,.0f}</div><div class="l">Swing High</div></div>
         <div class="stat"><div class="v">${ms.get('swing_low') or 0:,.0f}</div><div class="l">Swing Low</div></div>
       </div>
@@ -676,9 +705,9 @@ async def dashboard(symbol: str = "BTCUSD"):
 
   <div class="card">
     <div class="card-title">Confidence · Min {MIN_CONFIDENCE}% required</div>
-    <div style="font-size:26px;font-weight:bold;color:{cc_color}">{conf}%</div>
+    <div style="font-size:26px;font-weight:bold;color:{cc_color}">{conf_pct}%</div>
     <div class="conf-bar-bg">
-      <div class="conf-bar-fill" style="width:{conf}%;background:{cc_color}"></div>
+      <div class="conf-bar-fill" style="width:{conf_pct}%;background:{cc_color}"></div>
     </div>
   </div>
 
@@ -686,10 +715,10 @@ async def dashboard(symbol: str = "BTCUSD"):
     <div class="card-title">Trend &amp; Structure</div>
     <div style="color:{tc_color};font-size:16px;font-weight:bold">{decision.get('trend', '')}</div>
     <div style="color:{tc_color};font-size:13px;opacity:.7;margin-top:3px">
-      {ms.get('sequence', '')}
+      {sequence}
     </div>
     <div style="color:#333;font-size:11px;margin-top:3px">
-      {ms.get('strength_label', '')} · {ms.get('strength_pct', 0)}%
+      {ms.get('strength_label', '')} · {strength}%
     </div>
   </div>
 
@@ -905,7 +934,7 @@ async def recs_page():
             f'gap:8px;font-size:11px">' +
             f'<div style="background:#0d0d0d;border-radius:6px;padding:8px">' +
             f'<div style="color:#444;margin-bottom:2px">CONFIDENCE</div>' +
-            f'<div style="color:#fff">{conf}</div></div>' +
+            f'<div style="color:#fff">{conf_pct}</div></div>' +
             f'<div style="background:#0d0d0d;border-radius:6px;padding:8px">' +
             f'<div style="color:#444;margin-bottom:2px">ACTION</div>' +
             f'<div style="color:#2ecc71">{action[:60]}</div></div>' +
@@ -975,7 +1004,7 @@ async def journal_page():
                 f"Take Profit: <b style='color:#2ecc71'>${tp:,.2f}</b><br>"
                 f"R:R: <b style='color:#fff'>1:{rr}</b> &nbsp;|&nbsp; "
                 f"Risk: <b style='color:#fff'>${risk:.2f}</b> &nbsp;|&nbsp; "
-                f"Confidence: <b style='color:#fff'>{conf}%</b><br>"
+                f"Confidence: <b style='color:#fff'>{conf_pct}%</b><br>"
                 f"Structure: <b style='color:#2ecc71'>{trend} {seq}</b> &nbsp;|&nbsp; "
                 f"{size_lbl}"
                 f"</div>"
@@ -1122,9 +1151,6 @@ async def execute_route(symbol: str = Query(...), side: str = Query(...)):
         )
     scan_data = scan(symbol)
     analysis  = analyze(scan_data)
-    ms        = analysis.get('ms',  {}) or {}
-    vol       = analysis.get('vol', {}) or {}
-    frames    = analysis.get('frames', []) or []
     decision  = decide(analysis)
     result    = open_trade(symbol, side, analysis, decision)
 
@@ -1196,17 +1222,17 @@ async def api_analyze(symbol: str = "BTCUSD"):
     symbol = symbol.upper()
     if symbol not in VALID_SYMBOLS: symbol = "BTCUSD"
     scan_data = scan(symbol)
-    if not scan_data["candles"]: return {"error": "Market data unavailable"}
+    if not scan_data.get("candles", []): return {"error": "Market data unavailable"}
     analysis  = analyze(scan_data)
     decision  = decide(analysis)
     return {
         "symbol":     symbol,
-        "price":      scan_data["price"],
+        "price":      scan_data.get("price", 0) or 0,
         "decision":   decision["decision"],
         "confidence": decision["confidence"]["total"],
         "reasons":    decision["reasons"],
         "levels":     decision["levels"],
-        "session":    scan_data["session"],
+        "session":    scan_data.get("session", ""),
         "auto_status":get_auto_status(),
     }
 
